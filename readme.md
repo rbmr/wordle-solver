@@ -51,10 +51,10 @@ We can use a cache to store $E(C)$ and $g^*$ for each set of candidates $C$.
 
 Insight: Each response from Wordle provides information that reduces the candidate set. In the best case, responses partition candidates as evenly as possible.
 
-- The number of possible responses $|R| = 3^{N_c}$
+- The number of possible responses $|R| = 3^{N_c}$ where $N_c$ is the number of characters each word.
 - To distinguish among $|C|$ possibilities requires at least $\log_{|R|}|C|$ responses in expectation. $E(C) \geq \log_{|R|}|C|$ 
 - $\log_{|R|}|C| = \log_2|C| / \log_2|R| = \gamma \cdot \log_2|C|$ where we precompute $\gamma = 1 / \log_2|R| = 1 / \log_2 3^{N_c} = N_c / \log_2 3$
-{N_c}
+- 
 We can use this to compute a lower bound on $E(C, g)$ by applying the above equation to the remaining candidates $E(C_{g,r})$:
 
 $$E(C, g) \geq 1 + \sum_{r \in R \setminus \{\text{all green}\}}\left( \frac{|C_{g,r}|}{|C|} \times \gamma \log_2|C_{g,r}|\right)$$
@@ -81,6 +81,7 @@ If ever a lower bound for a guess's expected number of guesses exceeds the curre
 **Goal**: Maximize coverage of common letters across candidates.
 
 Letter frequency across C:
+
 $$\text{freq}(\ell) = |\{c \in C ~|~ \ell \in c\}|$$
 
 For each guess $g$, score by unique letters:
