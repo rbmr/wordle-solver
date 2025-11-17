@@ -1,8 +1,9 @@
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use ndarray::ArrayView2;
 use bitvec::prelude::{bitvec, BitVec, Lsb0};
-use log::{info, warn};
+use log::{debug, info};
 use rayon::iter::IntoParallelRefIterator;
+use sled::Config;
 use crate::db::{generate_db_name, CacheManager};
 use crate::game::{CORRECT, N_CHARS, compute_cidx_to_gidx_map, compute_partitions, Partition};
 use crate::score::{score_min_remaining};
@@ -21,16 +22,20 @@ fn compute_lower_bound(
         if partition.response == CORRECT {
             continue;
         }
-        let size = partition.candidates.count_ones() as f64;
-        if size > 0.0 {
-            // n * log2(n)
-            sum += size * size.log2();
-        } else {
-            warn!("Unexpected partition size {}, ignoring.", size);
-        }
+        let size = partition.candidates.count_ones();
+        let size_f = size as f64;
+        let lb_e_c_gr = match size  {
+            0 => panic!("Unexpected partition size 0"),
+            1 => 1.0,
+            2 => 1.5,
+            _ => {
+                (GAMMA * size_f.log2()).max(1.5)
+            }
+        };
+        sum += size_f * lb_e_c_gr;
     }
-    // 1 + (γ / |C|) * Σ(|C_gr| * log2(|C_gr|))
-    1.0 + (GAMMA / n_candidates as f64) * sum
+    // 1 + (1 / |C|) * Σ(|C_gr| * LB(C_gr))
+    1.0 + sum / (n_candidates as f64)
 }
 
 fn find_min_expected_guesses(
@@ -143,7 +148,10 @@ pub fn compute_optimal_strategy(
 
     // Set up the Database (Memoization Cache)
     let db_name = generate_db_name(all_candidates_arr, all_guesses_arr);
-    let memo_cache: CacheManager<BitVec<u64>, (f64, usize)> = CacheManager::new(&db_name);
+    let config = Config::new()
+        .cache_capacity(8 * 1024 * 1024 * 1024)
+        .mode(sled::Mode::HighThroughput);
+    let memo_cache: CacheManager<BitVec<u64>, (f64, usize)> = CacheManager::new(&db_name, config);
     info!("Opened memoization cache with {} existing entries.", memo_cache.len());
 
     // Build the c_idx -> g_idx map, used for base cases.

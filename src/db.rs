@@ -1,7 +1,7 @@
 use bitvec::prelude::BitVec;
 use log::{info, trace};
 use ndarray::ArrayView2;
-use sled::Db;
+use sled::{Config, Db};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use bincode::config::standard;
@@ -41,8 +41,8 @@ where
     V: Serialize + DeserializeOwned
 {
     /// Opens or creates a database at the given path.
-    pub fn new(path: &str) -> Self {
-        let db = sled::open(path).expect("Failed to open sled database");
+    pub fn new(path: &str, config: Config) -> Self {
+        let db = config.path(path).open().expect("Failed to open sled database");
         Self { db, _marker: std::marker::PhantomData}
     }
 
