@@ -1,5 +1,6 @@
+use bitvec::vec::BitVec;
 use rayon::iter::ParallelIterator;
-use crate::game::{get_idx, N_LETTERS, N_CHARS, Partition};
+use crate::game::{get_idx, N_LETTERS, N_CHARS};
 use ndarray::ArrayView2;
 use rayon::prelude::IntoParallelIterator;
 
@@ -44,12 +45,12 @@ pub fn score_max_frequency(
 }
 
 pub fn score_min_remaining(
-    partitions: &Vec<Partition>,
+    partitions: &Vec<BitVec<u64>>,
 ) -> usize {
     partitions
         .into_par_iter()
         .map(|partition| {
-            let partition_size = partition.candidates.count_ones();
+            let partition_size = partition.count_ones();
             partition_size * partition_size
         })
         .sum()

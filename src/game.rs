@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap};
 use bitvec::bitvec;
 use bitvec::order::Lsb0;
 use bitvec::vec::BitVec;
@@ -8,11 +8,31 @@ use ndarray::{par_azip, Array2, ArrayView1, ArrayView2, Zip};
 pub const N_CHARS: usize = 5;
 pub const N_LETTERS: usize = 26; // A-Z
 
+pub const N_RESPONSES: usize = 243; // 3^5 = 243
+
+const POWERS_OF_3: [usize; N_CHARS] = [1, 3, 9, 27, 81];
+
 pub const B: u8 = b'B';
 pub const G: u8 = b'G';
 pub const Y: u8 = b'Y';
 
 pub const CORRECT: [u8; N_CHARS] = [G; N_CHARS];
+
+/// Converts a Wordle response [B, Y, G, ...] to a unique index 0-242.
+#[inline]
+pub fn response_to_index(response: &[u8; N_CHARS]) -> usize {
+    let mut index = 0;
+    for i in 0..N_CHARS {
+        let val = match response[i] {
+            B => 0,
+            Y => 1,
+            G => 2,
+            _ => unreachable!(), // Should not happen
+        };
+        index += val * POWERS_OF_3[i];
+    }
+    index
+}
 
 pub fn is_letter_char(&c: &u8) -> bool {
     (c >= b'A') & (c <= b'Z')
@@ -113,26 +133,53 @@ pub fn compute_response_cache(
     response_cache
 }
 
-#[derive(Clone)]
-pub struct Partition {
-    pub response: [u8; N_CHARS],
-    pub candidates: BitVec<u64>,
-}
-
-/// Partitions a set of candidates, based on their response to a guess.
-///
-/// The returned partitions will be disjoint, and non-empty.
-pub fn compute_partitions(
+pub fn compute_partitions_with_hashset(
     candidate_set: &BitVec<u64>,
     response_cache: ArrayView2<[u8; N_CHARS]>,
     guess_idx: usize,
-) -> Vec<Partition> {
-    let mut temp_partitions: HashMap<[u8; N_CHARS], BitVec<u64>> = HashMap::new();
+) -> Vec<BitVec<u64>> {
+    // Create an empty hashset of BitVecs to store the partitions.
+    let mut partitions: HashMap<[u8; N_CHARS],BitVec<u64>> = HashMap::new();
+
+    // Iterate over the current candidates
     for candidate_idx in candidate_set.iter_ones() {
         let response = response_cache[[guess_idx, candidate_idx]];
-        temp_partitions.entry(response).or_insert_with(|| bitvec![u64, Lsb0; 0; candidate_set.len()]).set(candidate_idx, true);
+        partitions
+            .entry(response)
+            .or_insert_with(|| bitvec![u64, Lsb0; 0; candidate_set.len()])
+            .set(candidate_idx, true);
     }
-    temp_partitions.into_iter().map(|(response, candidates)| Partition{response, candidates}).collect()
+
+    // Collect all created BitVecs.
+    partitions
+        .into_iter()
+        .map(|(_,p)| p)
+        .collect()
+}
+
+pub fn compute_partitions_with_arr(
+    candidate_set: &BitVec<u64>,
+    response_cache: ArrayView2<[u8; N_CHARS]>,
+    guess_idx: usize,
+) -> Vec<BitVec<u64>> {
+    // Create an empty array of BitVecs to store the partitions.
+    let mut partitions: [Option<BitVec<u64>>; N_RESPONSES] =
+        std::array::from_fn(|_| None);
+
+    // Iterate over the current candidates
+    for candidate_idx in candidate_set.iter_ones() {
+        let response = response_cache[[guess_idx, candidate_idx]];
+        let index = response_to_index(&response);
+        partitions[index]
+            .get_or_insert_with(|| bitvec![u64, Lsb0; 0; candidate_set.len()])
+            .set(candidate_idx, true);
+    }
+
+    // Collect all created BitVecs.
+    partitions
+        .into_iter()
+        .filter_map(|p| p)
+        .collect()
 }
 
 /// Precomputes a mapping from a `candidate_index` to its corresponding `guess_index`.
@@ -169,4 +216,15 @@ pub fn compute_cidx_to_gidx_map(
 
     // Return the fully computed cache.
     c_idx_to_g_idx_map
+}
+
+/// Computes the lower bounds for each partition size from 0 up until n_candidates inclusive.
+pub fn compute_lower_bounds(n_candidates: usize) -> Vec<f64> {
+    (0..n_candidates+1).map(|n| lower_bound(n as f64)).collect()
+}
+
+/// Computes a lower bound on the optimal expected guesses for a given partition size.
+#[inline]
+pub fn lower_bound(n_candidates: f64) -> f64 {
+    2.0 - 1.0 / n_candidates
 }
