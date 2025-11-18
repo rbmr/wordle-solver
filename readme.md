@@ -66,66 +66,127 @@ $$P(C_{g,r} \mid C, g) = \frac{|C_{g,r} \setminus \{g\}|}{|C|}$$
 
 $$P(\emptyset \mid \emptyset, \cdot) = 1$$
 
-- The reward function $R(s)$ penalizes every guess made, and is therefore independent of the action $a$.
+  - The cost function $Cost(s)$ penalizes every guess made.
 
-$$R(s) = \begin{cases} 0 & \text{if } s = \emptyset \\ -1 & \text{otherwise} \end{cases}$$
+$$Cost(s) = \begin{cases} 0 & \text{if } s = \emptyset \\ 1 & \text{otherwise} \end{cases}$$
 
-- The discount factor $\gamma = 1$
+  - The discount factor $\gamma = 1$
 
-The goal is to find an optimal policy, $\pi^*(s) \to g$, that minimizes the total expected number of guesses. This is equivalent to maximizing the total expected reward in this formulation.
+The goal is to find an optimal policy, $\pi^*(s) \to g$, that minimizes the total expected cost (total expected number of guesses).
 
 Substituting these values into the Bellman optimality equations and simplifying gives:
 
-$$Q^*(C, g) = -1 + \sum_{r \in \hat{R} } \frac{|C_{g,r}|}{|C|} V^*(C_{g,r})$$
+$$Q^*(C, g) = 1 + \sum_{r \in \hat{R} } \frac{|C_{g,r}|}{|C|} V^*(C_{g,r})$$
 
-$$V^*(C) = \max_{g \in G} Q^*(C, g)$$
+$$V^*(C) = \min_{g \in G} Q^*(C, g)$$
 
 Where $\hat{R} = \{r \in R \mid r \neq r_w \}$ is the set of all possible responses excluding the win response.
 
 ## Computing the Optimal Strategy feasibly
 
+### The infeasibility
+
+The reason we can't compute the optimal strategy in polynomial time is because the number states is exponential in the number of initial candidates.
+
+$$|S| = 2^{|C_0|}$$
+
+In order to make the algorithm feasible, we must drastically reduce the number of states to visit.
+
+A first insight is to realize that not all states are reachable from $|C_0|$, however, an attempt to find all reachable states via a BFS traversal will quickly show that even this simplified problem is still intractable, showing the same exponential growth.
+
+A next insight is then, that many of these states are only reachable by making terrible guesses that clearly don't correspond to the optimal value. For example, a guess filtering out only one candidate will lead to a new distinct state, but this state is likely irrelevant to the optimal strategy.
+
+These insights combined lead to the following algorithmic optimizations.
+
+### Integer optimization: Minimizing total cost
+
+To avoid the computational overhead and precision issues of floating point arithmetic, we reformulate the objective function. Instead of minimizing the expected number of guesses (which requires division), we minimize the total number of guesses required to solve for all candidates in $C$.
+
+Let $T^*(C)$ be the minimum total guesses for candidate set $C$. We can define the relationship to the expected value $V^*(C)$ as:
+
+$$T^*(C) = |C| \cdot V^*(C)$$
+
+We can then update the Bellman Equations as follows:
+
+$$T^*(C) = |C| \cdot V^*(C) = \min_{g \in G} \left( |C| \cdot 1 + |C| \sum_{r \in \hat{R}} \frac{|C_{g,r}|}{|C|} V^*(C_{g,r}) \right) = \min_{g \in G} \left( |C| + \sum_{r \in \hat{R}} T^*(C_{g,r}) \right)$$
+
+This gives the integer-only recurrence relation. Note that the term $|C|$ represents the fact that the current guess $g$ adds exactly 1 guess to the path of every candidate currently in the set.
+
+Rewriting the recurrence relation in alternating recursive form we get:
+
+$$T^*(C) = \min_{g \in G} T^*(C, g)$$
+
+$$T^*(C, g) = |C| + \sum_{r \in \hat{R}} T^*(C_{g,r})$$
+
 ### Base Cases
 
-- $V^*(C) = 0$ if $C = \emptyset$ since the game is over.
-- $V^*(C) = -1$ if $|C| = 1$ since the remaining answer is the secret word.
-- $V^*(C) = -1.5$ if $|C| = 2$ since the optimal strategy is to pick a word at random. Either the current or the next guess is correct, 50-50 chance.
+- Empty Set: $T^*(\emptyset) = 0$
+- Single Word: $T^*(\{c\}) = 1$ 
+  - The word is guessed immediately.
+- Two Words: $T^*(\{c_1, c_2\}) = 3$.
+  - 1 guess identifies the first word.
+  - 2 guesses identifies the second. 
+  - Total: $1+2=3$.
 
 ### Memoization
 
-We can use a cache to store $V^*(C)$ and $\pi^*(C)$ for each set of candidates $C$ where $|C| > 2$.
+We use a memoization to store T^*(C) for each set of candidates $C$ where $|C| > 2$.
+
+### Lower bounds on $T^*(C)$
+
+In a minimization problem, we require admissible lower bounds (optimistic estimates) on the cost to perform pruning.
+
+Bound 1 (Information Theoretic):Each response from Wordle provides information that reduces the candidate set. To distinguish among $|C|$ possibilities requires at least $\log_{|R|}(|C|)$ responses in expectation. Converting this to total guesses:
+
+$$T^*(C) \geq |C| \cdot \log_{|R|} |C| = |C| \cdot \gamma \log_2 |C|$$
+
+Where $\gamma = 1 / \log_2(|R|) = 1 / \log_2(3^{N_c}) = 1 / (N_c \cdot \log_2(3))$.
+
+Bound 2 (Minimum Depth / Pigeonhole): We derive the absolute minimum number of total guesses required for a set of size $|C|$ by assuming the best-case scenario for every guess. 
+1. We must pick a single guess $g$. 
+2. If the secret word happens to be $g$ we solve it in 1 guess. This happens for at most one candidate in $C$.  
+3. For the remaining $|C| - 1$ candidates, the guess $g$ is incorrect. Therefore, we need at least 1 additional guess to solve them. Giving a path length of at least 2.
+
+$$T^*(C) \geq 1 \cdot 1 + 2 \cdot (|C| - 1) = 2|C| - 1$$
+
+The tightest lower bound $L(C)$ is just the maximum of the two bounds. Assuming $N_c = 5$, Bound 2 is tighter than bound 1 for all relevant candidate set sizes. On top of this, its also more efficient to compute.
+
+Finally, we may compute a lower bound on the specific total cost of a guess $T^*(C,g)$ by using the actual computed optimal value $T^*(C_{g,r})$ where available (memoized), and the lower bound $L(C_{g,r})$ otherwise.
+
+$$T_{LB}(C, g) = |C| + \sum_{r \in \hat{R} } \hat{T}(C_{g,r})$$
+
+where:
+
+$$\hat{T}(S) = \begin{cases} T^*(S) & \text{if } S \text{ is in cache} \\ L(S) & \text{otherwise} \end{cases}$$
+
+### Upper bounds on $T^*(C)$
+
+An upper bound on $T^*(C)$ can be computed using a greedy strategy (heuristic). Since we are minimizing cost, the total cost produced by any valid policy (even a suboptimal one) is a valid upper bound on the true minimal total cost.
+
+Let $h(C)$ be a heuristic policy function that returns a guess $g$ for a set $C$. We can calculate the precise total cost of this policy, denoted as $UB(C)$, by simulating the game tree using $h(C)$ recursively.
+
+$$T^*(C) \leq UB(C)$$
+
+We use this $UB(C)$ to initialize our search. If we find a branch in our search tree with a lower bound exceeding $UB(C)$, we know that branch cannot possibly beat our heuristic, and we can prune it.
 
 ### Upper bounds on $V^*(C)$
 
-Bound 1: Each response from Wordle provides information that reduces the candidate set. In the best case, responses partition candidates as evenly as possible. Consequently, to distinguish among $|C|$ possibilities requires at least $\log_{|R|}(|C|)$ responses in expectation. We may rewrite this as $\log_{|R|}(|C|) = \log_2(|C|) / \log_2(|R|) = \gamma \log_2(|C|)$ where we precompute $\gamma = 1 / \log_2(|R|) = 1 / \log_2(3^{N_c}) = 1 / (N_c \cdot \log_2(3)) $.
-
-$$V^*(C) \leq -\gamma \log_2|C|$$
-
-Bound 2: Any guess $g \in C$ has a $1/|C|$ chance of being correct. If the guess is incorrect, it takes at least 1 additional guess to find the secret word. This means that in order to distinguish among $|C|$ possibilities, we need at least $1 \cdot \frac{1}{|C|} + 2 \cdot \frac{|C|-1}{|C|} = 2 - \frac{1}{|C|}$ guesses.
-
-$$V^*(C) \leq \frac{1}{|C|} - 2$$
-
-The tightest upper bound $U(C)$ is just the minimum of the two bounds. Assuming $N_c = 5$, Bound 2 is tighter than bound 1 for all candidate set sizes of $|C|$ all the way up until $|C| \approx 59043.5$ which is even larger than $|C_0|$. Consequently, Bound 2 is tighter in all cases, on top of also being more efficient to compute.
-
-Finally, we may compute an upper bound on the optimal guess-value function $Q^*(C,g)$ by using the actual computed optimal state-value function $V^*(C)$ where available, and the aforementioned upper bound $U(C)$ otherwise.
-
-$$Q_{UB}(C, g) = -1 + \sum_{r \in \hat{R} } \frac{|C_{g,r}|}{|C|} \hat{V}(C_{g,r})$$ 
-where:
-$$\hat{V}(C_{g,r}) = \begin{cases} V^*(C_{g,r}) & \text{if available} \\ U(C_{g,r}) & \text{otherwise} \end{cases}$$
-
-### Lower bounds on $V^*(C)$
-
-A lower bound on the $V^*(C)$ can be computed using a greedy strategy (heuristic). These lower bounds can get relatively tight taking (only) polynomial time.
+An upper bound on $V^*(C)$ can be computed using a greedy strategy (heuristic). Since we are minimizing cost, a specific policy (even a suboptimal greedy one) provides a valid upper bound on the true minimal cost. These upper bounds can get relatively tight taking (only) polynomial time.
 
 ### Pruning
 
-Pruning: We keep track of a maximum value across all guesses $g \in G$ so far. If an upper bound for a guess' optimal value ever falls below the current maximum, we can skip the guess.
+To solve the problem within a reasonable timeframe, we employ a Branch and Bound strategy to eliminate (prune) guesses that cannot possibly yield an optimal solution. We track the best solution found so far for the current set $C$, denoted as $\beta$, and discard any guess $g$ whose lower bound cost exceeds this value.
 
-We want to prune as much as possible, which means:
-- increasing the maximum value as early as possible
-  - by initializing the maximum value to the expected value using a heuristic.
-  - by going through the guesses from most to least promising (computed using the heuristic).
-- increasing the upper bound for a guess as early as possible 
-  - by going through the partitions in reverse order of size
+The pruning logic proceeds as follows:
+1. Initialization ($\beta$): We first compute an upper bound for $T^*(C)$ using a heuristic policy. We set our initial best-known cost $\beta$ to this value. $$\beta \leftarrow UB_{heuristic}(C)$$
+2. Guess Ordering: We sort the allowed guesses $g \in G$ based on the heuristic score. Processing promising guesses first allows us to lower $\beta$ earlier in the search, increasing the effectiveness of pruning for subsequent guesses.
+3. Incremental Lower Bound Refinement: 
+   1. For each guess $g$, we calculate an initial lower bound $T_{LB}(C, g)$ using the static lower bounds $L(S)$ (or memoized values if available) for all resulting partitions. $$T_{LB}(C, g) = |C| + \sum_{r \in \hat{R}} \hat{T}(C_{g,r})$$ 
+   2. If $T_{LB}(C, g) \geq \beta$, the guess is immediately pruned. Otherwise, we incrementally refine it by computing the exact costs of the sub-problems.
+   3. We iterate through the partitions $C_{g,r}$ sorted by size in descending order. We prioritize larger partitions because they contribute the most to the total cost, causing $T_{LB}$ to rise faster and triggering prune conditions earlier.
+   4. For each partition $C_{g,r}$: If the exact cost $T^*(C_{g,r})$ is not yet known (not in cache), we recursively compute it. We update the running lower bound for the guess by replacing the optimistic estimate $L(C_{g,r})$ with the actual cost $T^*(C_{g,r})$. $$T_{LB}(C, g) \leftarrow T_{LB}(C, g) + \left( T^*(C_{g,r}) - L(C_{g,r}) \right)$$
+   5. Check: After every update, if $T_{LB}(C, g) \geq \beta$, we stop processing partitions for this guess and prune it immediately.
+4. Update Best:If we fully evaluate a guess $g$ (all partitions solved) and the final cost is strictly less than $\beta$, we update our best known solution:$$\beta \leftarrow T_{LB}(C, g)$$
 
 ### Representing $C$
 
@@ -142,12 +203,6 @@ The choice of data structure for the candidate set $C$ is really important. Let 
 | **Time to create an empty set**           | $O(N/64)$             | $O(1)$                                |
 | **Time to add an element**                | $O(1)$                | $O(k)$                                |
 | **Time to add a maximum element**         | $O(1)$                | $O(1)$                                |
-
-### Computing the number of reachable states from |C_0|
-
-The total number of states is $|S| = 2^{|C_0|}$, but not all of them are reachable from |C_0|.
-
-You can find all reachable states and count them using a BFS traversal. 
 
 ## Heuristics
 
