@@ -6,11 +6,6 @@ edition = "2024"
 [dependencies]
 log = "0.4"
 env_logger = "0.11"
-ndarray = { version = "0.17.1", features = ["rayon"] } # Ensure rayon feature is enabled for ndarray
 once_cell = "1.21.3"
-thiserror = "2.0.17"
 rayon = "1.11.0"
 bitvec = { version = "1.0.1", features = ["serde"] }
-sled = "0.34.7"
-bincode = { version = "2.0.1", features = ["serde"] }
-serde = { version = "1.0.228", features = ["derive"] }

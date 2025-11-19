@@ -1,6 +1,6 @@
 pub mod words;
-pub mod game;
-pub mod db;
+pub mod utils;
 pub mod solver;
 pub mod score;
 pub mod sim;
+pub mod resp;

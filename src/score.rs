@@ -3,19 +3,19 @@ use std::ops::Mul;
 use bitvec::order::Lsb0;
 use bitvec::vec::BitVec;
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
-use crate::game::{letter_to_index, N_LETTERS, N_CHARS, N_RESPONSES, response_to_index};
-use ndarray::ArrayView2;
 use rayon::prelude::IntoParallelIterator;
+use crate::resp::{N_RESPONSES};
+use crate::words::{letter_to_index, N_CHARS, N_LETTERS};
 
 /// Given a list of candidate indices, computes the number of candidates that contain each letter.
 pub fn compute_letter_frequencies(
     candidate_indices: &[usize],
-    all_candidates: ArrayView2<u8>,
+    all_candidates: &[[u8; N_CHARS]],
 ) -> [usize; N_LETTERS] {
     candidate_indices
         .into_par_iter()
         .map(|c_idx| {
-            let candidate_word = all_candidates.row(*c_idx);
+            let candidate_word = &all_candidates[*c_idx];
             let mut freq_contribution = [0usize; N_LETTERS];
             for &letter_byte in candidate_word {
                 freq_contribution[letter_to_index(letter_byte)] = 1;
@@ -50,17 +50,16 @@ pub fn get_max_freq_score(
 pub fn pick_max_freq(
     candidate_indices: &[usize],
     guess_indices: &[usize],
-    all_candidates_arr: ArrayView2<u8>,
-    all_guesses_arr: ArrayView2<u8>,
+    all_candidates: &[[u8; N_CHARS]],
+    all_guesses: &[[u8; N_CHARS]],
 ) -> usize {
     let letter_frequencies: [usize; N_LETTERS] =
-        compute_letter_frequencies(candidate_indices, all_candidates_arr);
+        compute_letter_frequencies(candidate_indices, all_candidates);
 
     guess_indices
         .par_iter()
         .map(|&g_idx| {
-            let guess_slice: &[u8] = all_guesses_arr.row(g_idx).to_slice().unwrap();
-            let guess_word: &[u8; N_CHARS] = guess_slice.try_into().expect("Guess word must be 5 bytes long.");
+            let guess_word = &all_guesses[g_idx];
             let score = get_max_freq_score(guess_word, &letter_frequencies);
             (usize::MAX - score, g_idx)
         })
@@ -80,27 +79,28 @@ where
 
 pub fn get_min_remaining_score(
     candidates: &BitVec<u64, Lsb0>,
-    response_cache: ArrayView2<[u8; N_CHARS]>,
+    response_cache: &[u8],
     g_idx: usize,
+    n_candidates_total: usize,
 ) -> usize {
     let mut counts = [0usize; N_RESPONSES];
     for c_idx in candidates.iter_ones() {
-        let response = response_cache[[g_idx, c_idx]];
-        let index = response_to_index(&response);
-        counts[index] += 1;
+        let resp_idx = response_cache[g_idx * n_candidates_total + c_idx] as usize;
+        counts[resp_idx] += 1;
     }
     sum_of_squares(counts)
 }
 
 pub fn pick_min_remaining(
     candidates: &BitVec<u64, Lsb0>,
-    all_guesses: &[usize],
-    response_cache: ArrayView2<[u8; N_CHARS]>,
+    guess_indices: &[usize],
+    response_cache: &[u8],
+    n_candidates_total: usize,
 ) -> usize {
-    all_guesses
+    guess_indices
         .par_iter()
         .map(|&g_idx| {
-            let score = get_min_remaining_score(candidates, response_cache, g_idx);
+            let score = get_min_remaining_score(candidates, response_cache, g_idx, n_candidates_total);
             (score, g_idx)
         })
         .min()

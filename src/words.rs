@@ -1,31 +1,39 @@
-use ndarray::{Array2, ArrayView1};
 use std::collections::HashSet;
 use std::fs;
 use std::io;
 use std::path::Path;
-use thiserror::Error;
 use log::{debug, info, warn};
 use once_cell::sync::Lazy;
 
-#[derive(Error, Debug)]
-pub enum ConversionError {
-    #[error("Invalid word length for \"{word}\": expected {expected}, found {found}")]
-    LengthMismatch {
-        expected: usize,
-        found: usize,
-        word: String,
-    },
+pub const N_CHARS: usize = 5;
+pub const N_LETTERS: usize = 26; // A-Z
+
+/// Checks if a given byte is a letter (A-Z).
+#[inline]
+pub fn is_letter_char(c: u8) -> bool {
+    (c >= b'A') & (c <= b'Z')
+}
+
+/// Converts a letter byte (A-Z) to an index 0-25.
+#[inline]
+pub fn letter_to_index(c: u8) -> usize {
+    (c - b'A') as usize
 }
 
 /// Parses a string of words into a vector of unique words of the given length.
 pub fn parse_words(content: &str, n_chars: usize) -> HashSet<String> {
     let mut valid_words: HashSet<String> = HashSet::new();
     for word in content.split_whitespace() {
-        if word.len() == n_chars {
-            valid_words.insert(word.to_uppercase());
-        } else {
-            warn!("Skipping invalid word: \"{}\"", word);
+        if word.len() != n_chars {
+            warn!("Skipping word with unexpected len: \"{}\"", word);
+            continue;
         }
+        let word_uppercase = word.to_uppercase();
+        if !word_uppercase.chars().all(|c| is_letter_char(c as u8)) {
+            warn!("Skipping word with invalid chars: \"{}\"", word);
+            continue
+        }
+        valid_words.insert(word_uppercase);
     }
     valid_words
 }
@@ -44,36 +52,23 @@ pub fn load_words(words_file: &Path, n_chars: usize) -> Result<HashSet<String>, 
 }
 
 /// Converts a set of equal-length strings to a 2D byte array.
-pub fn words_to_arr(words: &HashSet<String>, n_chars: usize) -> Result<Array2<u8>, ConversionError> {
-    let n_samples = words.len();
-
+pub fn words_to_arr(words: &HashSet<String>) -> Vec<[u8; N_CHARS]> {
     let mut sorted_words: Vec<&String> = words.iter().collect();
     sorted_words.sort();
 
-    let mut flat_data: Vec<u8> = Vec::with_capacity(n_samples * n_chars);
+    let mut data = Vec::with_capacity(words.len());
     for word in sorted_words {
-        if word.len() != n_chars {
-            return Err(ConversionError::LengthMismatch {
-                expected: n_chars,
-                found: word.len(),
-                word: word.to_string(),
-            });
-        }
-        flat_data.extend_from_slice(word.as_bytes());
+        assert_eq!(word.len(), N_CHARS, "Unexpected word len: expected {}, found {}", N_CHARS, word.len());
+        let bytes = word.as_bytes();
+        let mut fixed_arr = [0u8; N_CHARS];
+        fixed_arr.copy_from_slice(&bytes[0..N_CHARS]);
+        data.push(fixed_arr);
     }
-
-    let array = Array2::from_shape_vec((n_samples, n_chars), flat_data)
-        .expect("Array shape and data length mismatch. This is a bug.");
-
-    Ok(array)
+    data
 }
 
-
-pub fn arr_to_string(arr: ArrayView1<u8>) -> String {
-    let bytes: &[u8] = arr.as_slice()
-        .expect("ArrayView data must be contiguous");
-
-    str::from_utf8(bytes)
+pub fn arr_to_word(arr: &[u8; N_CHARS]) -> String {
+    str::from_utf8(arr)
         .expect("Byte array must be valid UTF-8")
         .to_string()
 }
@@ -82,12 +77,12 @@ pub fn arr_to_string(arr: ArrayView1<u8>) -> String {
 pub static CANDIDATES: Lazy<HashSet<String>> = Lazy::new(|| {
     debug!("One-time parse: Loading default candidates...");
     let file_contents = include_str!("../words/candidates.txt");
-    parse_words(file_contents, 5)
+    parse_words(file_contents, N_CHARS)
 });
 
 /// The default list of words to guess from.
 pub static GUESSES: Lazy<HashSet<String>> = Lazy::new(|| {
     debug!("One-time parse: Loading default guesses...");
     let file_contents = include_str!("../words/guesses.txt");
-    parse_words(file_contents, 5)
+    parse_words(file_contents, N_CHARS)
 });

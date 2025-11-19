@@ -6,28 +6,45 @@ use bitvec::bitvec;
 use bitvec::order::Lsb0;
 use bitvec::vec::BitVec;
 use log::info;
-use ndarray::ArrayView2;
 use rayon::iter::IntoParallelIterator;
-use crate::game::{compute_cidx_to_gidx_map, lower_bound, response_to_index, N_CHARS, N_RESPONSES};
+use crate::utils::{compute_cidx_to_gidx_map};
+use crate::resp::{N_RESPONSES};
 use crate::score::get_min_remaining_score;
 use crate::sim::{simulate, MIN_REMAINING_POLICY};
+use crate::words::N_CHARS;
+
+/// Computes the lower bounds for each partition size from 0 up until n_candidates inclusive.
+pub fn compute_lower_bounds(n_candidates: usize) -> Vec<usize> {
+    (0..=n_candidates).map(|n| lower_bound(n)).collect()
+}
+
+/// Computes a lower bound on the optimal expected guesses for a given partition size.
+#[inline]
+pub fn lower_bound(n_candidates: usize) -> usize {
+    if n_candidates == 0 {
+        return 0;
+    } 2 * n_candidates - 1
+}
 
 pub fn compute_partitions_and_counts(
     candidates: &BitVec<u64, Lsb0>,
-    response_cache: ArrayView2<[u8; N_CHARS]>,
+    response_cache: &[u8],
     g_idx: usize,
+    n_total_candidates: usize,
 ) -> Vec<(BitVec<u64, Lsb0>, usize)> {
+
+    // Create arrays for partitions and for counts.
     let mut partitions: [Option<BitVec<u64, Lsb0>>; N_RESPONSES] =
         std::array::from_fn(|_| None);
     let mut counts = [0usize; N_RESPONSES];
 
+    // Iterate over all candidates to fill partitions.
     for c_idx in candidates.iter_ones() {
-        let response = response_cache[[g_idx, c_idx]];
-        let index = response_to_index(&response);
-        partitions[index]
+        let resp_idx = response_cache[g_idx * n_total_candidates + c_idx] as usize;
+        partitions[resp_idx]
             .get_or_insert_with(|| bitvec![u64, Lsb0; 0; candidates.len()])
             .set(c_idx, true);
-        counts[index] += 1;
+        counts[resp_idx] += 1;
     }
 
     // Collect all created BitVecs and their corresponding counts.
@@ -50,14 +67,15 @@ struct ScoredPartitions {
 
 
 struct SolverContext<'a> {
-    response_cache: ArrayView2<'a, [u8; N_CHARS]>,
+    response_cache: &'a [u8],
     memo: MemoCache,
+    n_candidates_total: usize,
 }
 
 impl<'a> SolverContext<'a> {
 
-    fn new(response_cache: ArrayView2<'a, [u8; N_CHARS]>) -> Self {
-        Self { response_cache, memo: HashMap::new() }
+    fn new(response_cache: &'a [u8], n_candidates_total: usize) -> Self {
+        Self { response_cache, memo: HashMap::new(), n_candidates_total }
     }
 
     /// Computes the minimum total cost for the given guess if it is < beta,
@@ -133,8 +151,12 @@ impl<'a> SolverContext<'a> {
         let mut valid_moves: Vec<ScoredPartitions> = Vec::with_capacity(guesses.len());
         let mut next_guesses: Vec<usize> = Vec::with_capacity(guesses.len());
         for &g_idx in guesses {
-
-            let partitions = compute_partitions_and_counts(candidates, self.response_cache, g_idx);
+            let partitions = compute_partitions_and_counts(
+                candidates,
+                self.response_cache,
+                g_idx,
+                self.n_candidates_total,
+            );
             if partitions.len() <= 1 {
                 continue; // No additional information. Skip.
             }
@@ -176,23 +198,23 @@ impl<'a> SolverContext<'a> {
 ///
 /// This function serves as the parallel entry point for the Branch and Bound algorithm.
 pub fn compute_optimal_move(
-    response_cache: ArrayView2<[u8; N_CHARS]>,
-    all_candidates_arr: ArrayView2<u8>,
-    all_guesses_arr: ArrayView2<u8>,
+    response_cache: &[u8],
+    all_candidates: &[[u8; N_CHARS]],
+    all_guesses: &[[u8; N_CHARS]],
 ) -> (usize, usize) {
 
     // Setup
-    let n_candidates = all_candidates_arr.nrows();
-    let n_guesses = all_guesses_arr.nrows();
+    let n_candidates = all_candidates.len();
+    let n_guesses = all_guesses.len();
     info!("Starting solver for {} candidates...", n_candidates);
     let initial_candidates = bitvec![u64, Lsb0; 1; n_candidates];
-    let c_idx_to_g_idx = compute_cidx_to_gidx_map(all_candidates_arr, all_guesses_arr);
+    let c_idx_to_g_idx = compute_cidx_to_gidx_map(all_candidates, all_guesses);
 
     // Compute initial heuristic cost using the "Min Remaining" heuristic.
     let heuristic_cost = simulate(
         &initial_candidates,
-        all_guesses_arr,
-        all_candidates_arr,
+        all_guesses,
+        all_candidates,
         response_cache,
         &c_idx_to_g_idx,
         &MIN_REMAINING_POLICY,
@@ -207,7 +229,12 @@ pub fn compute_optimal_move(
     let mut sorted_guesses: Vec<(usize, usize)> = (0..n_guesses)
         .into_par_iter()
         .map(|g_idx| {
-            let score = get_min_remaining_score(&initial_candidates, response_cache, g_idx);
+            let score = get_min_remaining_score(
+                &initial_candidates,
+                response_cache,
+                g_idx,
+                n_candidates,
+            );
             (g_idx, score)
         })
         .collect();
@@ -222,26 +249,33 @@ pub fn compute_optimal_move(
 
             let result = (|| {
                 // Compute partitions for the guess
-                let partitions = compute_partitions_and_counts(&initial_candidates, response_cache, g_idx);
-                if partitions.len() <= 1 {
+                let partitions_n_counts = compute_partitions_and_counts(
+                    &initial_candidates,
+                    response_cache,
+                    g_idx,
+                    n_candidates
+                );
+                if partitions_n_counts.len() <= 1 {
                     // This guess provides no info.
                     return (g_idx, usize::MAX);
                 }
 
-                // Check initial lower bound
-                let current_beta = global_beta.load(Ordering::Relaxed);
+                // Get initial lower bound
                 let mut lb = n_candidates;
-                for (_, count) in &partitions {
+                for (_, count) in &partitions_n_counts {
                     lb += lower_bound(*count);
                 }
+
+                // Check against global beta.
+                let current_beta = global_beta.load(Ordering::Relaxed);
                 if lb >= current_beta {
                     return (g_idx, usize::MAX);
                 }
 
                 // Solve exactly using local SolverContext.
-                let mut solver = SolverContext::new(response_cache);
+                let mut solver = SolverContext::new(response_cache, n_candidates);
                 let cost = solver.evaluate_guess(
-                    &partitions,
+                    &partitions_n_counts,
                     &guesses,
                     current_beta,
                     n_candidates
