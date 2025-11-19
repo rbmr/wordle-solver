@@ -161,9 +161,9 @@ $$\hat{T}(S) = \begin{cases} T^*(S) & \text{if } S \text{ is in cache} \\ L(S) &
 
 ### Upper bounds on $T^*(C)$
 
-An upper bound on $T^*(C)$ can be computed using a greedy strategy (heuristic). Since we are minimizing cost, the total cost produced by any valid policy (even a suboptimal one) is a valid upper bound on the true minimal total cost.
+An upper bound on $T^*(C)$ can be computed using a greedy strategy (heuristic). Since we are minimizing cost, the total cost produced by any valid policy $V^\pi(C)$ is a valid upper bound on the true minimal total cost $V^*\pi(C)$.
 
-Let $h(C)$ be a heuristic policy function that returns a guess $g$ for a set $C$. We can calculate the precise total cost of this policy, denoted as $UB(C)$, by simulating the game tree using $h(C)$ recursively.
+Let $\pi(C)$ be a heuristic policy function that returns a guess $g$ for a set $C$. We can calculate the total cost by simulating the game tree using $h(C)$ recursively.
 
 $$T^*(C) \leq UB(C)$$
 
@@ -187,6 +187,14 @@ The pruning logic proceeds as follows:
    4. For each partition $C_{g,r}$: If the exact cost $T^*(C_{g,r})$ is not yet known (not in cache), we recursively compute it. We update the running lower bound for the guess by replacing the optimistic estimate $L(C_{g,r})$ with the actual cost $T^*(C_{g,r})$. $$T_{LB}(C, g) \leftarrow T_{LB}(C, g) + \left( T^*(C_{g,r}) - L(C_{g,r}) \right)$$
    5. Check: After every update, if $T_{LB}(C, g) \geq \beta$, we stop processing partitions for this guess and prune it immediately.
 4. Update Best:If we fully evaluate a guess $g$ (all partitions solved) and the final cost is strictly less than $\beta$, we update our best known solution:$$\beta \leftarrow T_{LB}(C, g)$$
+
+### Dynamic Search Space Reduction
+
+To further optimize the algorithm, we observe that as the set of candidates $C$ shrinks, the set of useful guesses $G$ also shrinks. Iterating over the full set of all allowed guesses (approx. 13,000) is wasteful when $|C|$ is small, as most guesses will yield zero information (fail to partition $C$).
+
+We can dynamically maintain a reduced list of guesses $\hat{G}$ to pass down the recursion tree. A guess is considered "relevant" for a candidate set $C$ only if it has the _potential_ to distinguish between the remaining candidates. 
+
+We use a simple rule: if a guess fails to partition $C$, it will fail to partition any of its subsets $C_{g,r}$. Every time we compute the partitions for a guess $g$ given the current set $C$, we filter out all guesses that fail to partition any of the resulting partitions.
 
 ### Representing $C$
 
