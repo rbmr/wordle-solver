@@ -1,7 +1,4 @@
 use std::collections::{HashMap};
-use bitvec::bitvec;
-use bitvec::order::Lsb0;
-use bitvec::vec::BitVec;
 use log::info;
 use ndarray::{par_azip, Array2, ArrayView1, ArrayView2, Zip};
 
@@ -17,6 +14,9 @@ pub const G: u8 = b'G';
 pub const Y: u8 = b'Y';
 
 pub const CORRECT: [u8; N_CHARS] = [G; N_CHARS];
+const KB: f32 = 1024.0;
+const MB: f32 = 1024.0 * KB;
+const GB: f32 = 1024.0 * MB;
 
 /// Converts a Wordle response [B, Y, G, ...] to a unique index 0-242.
 #[inline]
@@ -34,11 +34,15 @@ pub fn response_to_index(response: &[u8; N_CHARS]) -> usize {
     index
 }
 
-pub fn is_letter_char(&c: &u8) -> bool {
+/// Checks if a given byte is a letter (A-Z).
+#[inline]
+pub fn is_letter_char(c: u8) -> bool {
     (c >= b'A') & (c <= b'Z')
 }
 
-pub fn get_idx(&c: &u8) -> usize {
+/// Converts a letter byte (A-Z) to an index 0-25.
+#[inline]
+pub fn letter_to_index(c: u8) -> usize {
     (c - b'A') as usize
 }
 
@@ -47,12 +51,12 @@ pub fn get_idx(&c: &u8) -> usize {
 pub fn get_resp(guess: ArrayView1<u8>, candidate: ArrayView1<u8>) -> [u8; N_CHARS] {
     assert_eq!(guess.len(), N_CHARS, "Guess length must be N_CHARS");
     assert_eq!(candidate.len(), N_CHARS, "Candidate length must be N_CHARS");
-    assert!(guess.iter().all(|&c| is_letter_char(&c)), "Guess must only contain letters");
-    assert!(candidate.iter().all(|&c| is_letter_char(&c)), "Candidate must only contain letters");
+    assert!(guess.iter().all(|&c| is_letter_char(c)), "Guess must only contain letters");
+    assert!(candidate.iter().all(|&c| is_letter_char(c)), "Candidate must only contain letters");
     let mut response = [B; N_CHARS];
     let mut cand_counts = [0u8; N_LETTERS];
     for &letter in candidate {
-        cand_counts[get_idx(&letter)] += 1;
+        cand_counts[letter_to_index(letter)] += 1;
     }
 
     Zip::from(&mut response)
@@ -61,7 +65,7 @@ pub fn get_resp(guess: ArrayView1<u8>, candidate: ArrayView1<u8>) -> [u8; N_CHAR
         .for_each(|resp_char, &g, &c| {
             if g == c {
                 *resp_char = G;
-                cand_counts[get_idx(&g)] -= 1;
+                cand_counts[letter_to_index(g)] -= 1;
             }
         });
 
@@ -70,7 +74,7 @@ pub fn get_resp(guess: ArrayView1<u8>, candidate: ArrayView1<u8>) -> [u8; N_CHAR
         .for_each(|resp_char, &g| {
             // Check if this letter is not already Green
             if *resp_char != G {
-                let letter_idx = get_idx(&g);
+                let letter_idx = letter_to_index(g);
                 // Check if this letter is left in the candidate
                 if cand_counts[letter_idx] > 0 {
                     *resp_char = Y; // Mark as Yellow
@@ -82,19 +86,14 @@ pub fn get_resp(guess: ArrayView1<u8>, candidate: ArrayView1<u8>) -> [u8; N_CHAR
     response
 }
 
-
 /// Formats a byte count into a human-readable string (KB, MB, GB).
-fn format_bytes(bytes: usize) -> String {
-    const KB: f64 = 1024.0;
-    const MB: f64 = 1024.0 * KB;
-    const GB: f64 = 1024.0 * MB;
-
-    if bytes as f64 >= GB {
-        format!("{:.2} GB", bytes as f64 / GB)
-    } else if bytes as f64 >= MB {
-        format!("{:.2} MB", bytes as f64 / MB)
-    } else if bytes as f64 >= KB {
-        format!("{:.2} KB", bytes as f64 / KB)
+fn format_bytes(bytes: f32) -> String {
+    if bytes >= GB {
+        format!("{:.2} GB", bytes / GB)
+    } else if bytes >= MB {
+        format!("{:.2} MB", bytes / MB)
+    } else if bytes >= KB {
+        format!("{:.2} KB", bytes / KB)
     } else {
         format!("{} bytes", bytes)
     }
@@ -109,6 +108,7 @@ pub fn compute_response_cache(
     info!("Building response cache...");
     let n_guesses = guesses.nrows();
     let n_candidates = candidates.nrows();
+    assert_eq!(guesses.ncols(), candidates.ncols());
 
     // Initialize the main response cache.
     let mut response_cache = Array2::from_elem((n_guesses, n_candidates), [B; N_CHARS]);
@@ -127,59 +127,10 @@ pub fn compute_response_cache(
     let element_count = n_guesses * n_candidates;
     let element_size = size_of::<[u8; N_CHARS]>();
     let total_bytes = element_count * element_size;
-    info!("Response cache built successfully. (~{})", format_bytes(total_bytes));
+    info!("Response cache built successfully. (~{})", format_bytes(total_bytes as f32));
 
     // Return the fully computed cache.
     response_cache
-}
-
-pub fn compute_partitions_with_hashset(
-    candidate_set: &BitVec<u64>,
-    response_cache: ArrayView2<[u8; N_CHARS]>,
-    guess_idx: usize,
-) -> Vec<BitVec<u64>> {
-    // Create an empty hashset of BitVecs to store the partitions.
-    let mut partitions: HashMap<[u8; N_CHARS],BitVec<u64>> = HashMap::new();
-
-    // Iterate over the current candidates
-    for candidate_idx in candidate_set.iter_ones() {
-        let response = response_cache[[guess_idx, candidate_idx]];
-        partitions
-            .entry(response)
-            .or_insert_with(|| bitvec![u64, Lsb0; 0; candidate_set.len()])
-            .set(candidate_idx, true);
-    }
-
-    // Collect all created BitVecs.
-    partitions
-        .into_iter()
-        .map(|(_,p)| p)
-        .collect()
-}
-
-pub fn compute_partitions_with_arr(
-    candidate_set: &BitVec<u64>,
-    response_cache: ArrayView2<[u8; N_CHARS]>,
-    guess_idx: usize,
-) -> Vec<BitVec<u64>> {
-    // Create an empty array of BitVecs to store the partitions.
-    let mut partitions: [Option<BitVec<u64>>; N_RESPONSES] =
-        std::array::from_fn(|_| None);
-
-    // Iterate over the current candidates
-    for candidate_idx in candidate_set.iter_ones() {
-        let response = response_cache[[guess_idx, candidate_idx]];
-        let index = response_to_index(&response);
-        partitions[index]
-            .get_or_insert_with(|| bitvec![u64, Lsb0; 0; candidate_set.len()])
-            .set(candidate_idx, true);
-    }
-
-    // Collect all created BitVecs.
-    partitions
-        .into_iter()
-        .filter_map(|p| p)
-        .collect()
 }
 
 /// Precomputes a mapping from a `candidate_index` to its corresponding `guess_index`.
@@ -212,19 +163,21 @@ pub fn compute_cidx_to_gidx_map(
 
     // Log the final cache size
     let total_bytes = c_idx_to_g_idx_map.len() * size_of::<usize>();
-    info!("candidate to guess mapping built successfully. (~{})", format_bytes(total_bytes));
+    info!("candidate to guess mapping built successfully. (~{})", format_bytes(total_bytes as f32));
 
     // Return the fully computed cache.
     c_idx_to_g_idx_map
 }
 
 /// Computes the lower bounds for each partition size from 0 up until n_candidates inclusive.
-pub fn compute_lower_bounds(n_candidates: usize) -> Vec<f64> {
-    (0..n_candidates+1).map(|n| lower_bound(n as f64)).collect()
+pub fn compute_lower_bounds(n_candidates: usize) -> Vec<usize> {
+    (0..=n_candidates).map(|n| lower_bound(n)).collect()
 }
 
 /// Computes a lower bound on the optimal expected guesses for a given partition size.
 #[inline]
-pub fn lower_bound(n_candidates: f64) -> f64 {
-    2.0 - 1.0 / n_candidates
+pub fn lower_bound(n_candidates: usize) -> usize {
+    if n_candidates == 0 {
+        return 0;
+    } 2 * n_candidates - 1
 }

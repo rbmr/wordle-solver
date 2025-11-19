@@ -48,9 +48,9 @@ where
 
     /// Inserts a (K, V) pair into the database.
     pub fn insert(&self, key: &K, value: &V) {
-        let key_bytes = encode_to_vec(key, bincode::config::standard())
+        let key_bytes = encode_to_vec(key, standard())
             .expect("Failed to serialize key");
-        let val_bytes = encode_to_vec(value, bincode::config::standard())
+        let val_bytes = encode_to_vec(value, standard())
             .expect("Failed to serialize value");
         trace!("Inserting value into database");
         self.db.insert(key_bytes, val_bytes).expect("DB insert failed");
@@ -58,12 +58,12 @@ where
 
     /// Retrieves a value from the database, deserializing it.
     pub fn get(&self, key: &K) -> Option<V> {
-        let key_bytes = encode_to_vec(key, bincode::config::standard())
+        let key_bytes = encode_to_vec(key, standard())
             .expect("Failed to serialize key for get");
         match self.db.get(key_bytes).expect("DB get failed") {
             Some(val_bytes) => {
                 let (value, _bytes_read): (V, usize) =
-                    decode_from_slice(&val_bytes, bincode::config::standard())
+                    decode_from_slice(&val_bytes, standard())
                         .expect("Failed to deserialize value");
                 Some(value)
             }

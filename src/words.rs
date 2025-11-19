@@ -4,7 +4,8 @@ use std::fs;
 use std::io;
 use std::path::Path;
 use thiserror::Error;
-use log::{info, warn};
+use log::{debug, info, warn};
+use once_cell::sync::Lazy;
 
 #[derive(Error, Debug)]
 pub enum ConversionError {
@@ -76,3 +77,17 @@ pub fn arr_to_string(arr: ArrayView1<u8>) -> String {
         .expect("Byte array must be valid UTF-8")
         .to_string()
 }
+
+/// The default list of candidate words.
+pub static CANDIDATES: Lazy<HashSet<String>> = Lazy::new(|| {
+    debug!("One-time parse: Loading default candidates...");
+    let file_contents = include_str!("../words/candidates.txt");
+    parse_words(file_contents, 5)
+});
+
+/// The default list of words to guess from.
+pub static GUESSES: Lazy<HashSet<String>> = Lazy::new(|| {
+    debug!("One-time parse: Loading default guesses...");
+    let file_contents = include_str!("../words/guesses.txt");
+    parse_words(file_contents, 5)
+});
