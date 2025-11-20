@@ -9,8 +9,10 @@ use bitvec::vec::BitVec;
 use log::{info};
 use clap::{Parser, Subcommand};
 use wordle_solver::cache::{compute_context_hash, just_save_cache, new_cache};
+use wordle_solver::graph::generate_comparison_image;
 use wordle_solver::policy::pick_optimal;
 use wordle_solver::resp::{compute_response_cache, get_resp, response_to_index, B, CORRECT_IDX, G, Y};
+use wordle_solver::sim::{simulate, MAX_FREQUENCY_POLICY, MIN_REMAINING_POLICY};
 use wordle_solver::solver::compute_optimal_move;
 use wordle_solver::words::{arr_to_word, words_to_arr, CANDIDATES, GUESSES, N_CHARS};
 
@@ -36,7 +38,13 @@ enum Commands {
         #[arg(short, long, default_value = "solver_cache.bin")]
         cache: PathBuf,
     },
-
+    /// Generate a PNG comparing heuristics
+    Compare {
+        #[arg(short, long, default_value = "solver_cache.bin")]
+        cache: PathBuf,
+        #[arg(short, long, default_value = "comparison.png")]
+        output: PathBuf,
+    },
 }
 
 fn main() -> Result<(), anyhow::Error> {
@@ -69,6 +77,12 @@ fn main() -> Result<(), anyhow::Error> {
                 candidates_arr,
                 guesses_arr,
                 response_cache
+            )?;
+        },
+        Commands::Compare { cache, output } => {
+             compare_heuristics(
+                &cache, &output, context_hash,
+                candidates_arr, guesses_arr, response_cache
             )?;
         }
     }
@@ -263,4 +277,54 @@ fn get_response(
 
         return Ok(resp_idx);
     }
+}
+
+fn compare_heuristics(
+    cache_path: &Path,
+    output_path: &Path,
+    context_hash: u64,
+    candidates: Vec<[u8; N_CHARS]>,
+    guesses: Vec<[u8; N_CHARS]>,
+    response_cache: Box<[u8]>,
+) -> Result<(), anyhow::Error> {
+    info!("--- Wordle Solver: COMPARISON Mode ---");
+
+    if !cache_path.exists() {
+        bail!("Cache file not found. Run 'generate' first.");
+    }
+    let memo = wordle_solver::cache::load_cache(cache_path, context_hash)
+        .context("Failed to load cache")?;
+
+    let c_idx_to_g_idx = wordle_solver::utils::compute_cidx_to_gidx_map(&candidates, &guesses);
+    let initial_candidates = bitvec![u64, Lsb0; 1; candidates.len()];
+    let _memo_ref = Some(memo);
+
+    let mut results = Vec::new();
+
+    info!("1/3: Simulating Max Frequency...");
+    let stats_max = simulate(
+        &initial_candidates, &guesses, &candidates, &response_cache,
+        &c_idx_to_g_idx, None, MAX_FREQUENCY_POLICY
+    );
+    results.push(("Max Frequency", stats_max));
+
+    info!("2/3: Simulating Min Remaining...");
+    let stats_min = simulate(
+        &initial_candidates, &guesses, &candidates, &response_cache,
+        &c_idx_to_g_idx, None, MIN_REMAINING_POLICY
+    );
+    results.push(("Min Remaining", stats_min));
+
+    // info!("3/3: Simulating Optimal (this uses the cache)...");
+    // let stats_opt = simulate(
+    //     &initial_candidates, &guesses, &candidates, &response_cache,
+    //     &c_idx_to_g_idx, memo_ref, OPTIMAL_CACHE_POLICY
+    // );
+    // results.push(("Optimal", stats_opt));
+
+    info!("Generating plot at {:?}", output_path);
+    generate_comparison_image(results, output_path)
+        .map_err(|e| anyhow::anyhow!("Plotting error: {}", e))?;
+
+    Ok(())
 }

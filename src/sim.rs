@@ -1,8 +1,56 @@
+use std::collections::BTreeMap;
 use bitvec::prelude::*;
 use crate::cache::MemoCache;
 use crate::resp::{generate_partitions};
 use crate::policy::{pick_max_freq, pick_min_remaining, pick_optimal};
 use crate::words::N_CHARS;
+
+pub struct SimStats {
+    pub total_words: usize,
+    // Map<NumGuesses, CountOfWords>
+    pub distribution: BTreeMap<usize, usize>,
+}
+
+impl SimStats {
+    pub fn new() -> Self {
+        Self {
+            total_words: 0,
+            distribution: BTreeMap::new(),
+        }
+    }
+
+    pub fn inc(&mut self, guesses: usize) {
+        self.total_words += 1;
+        *self.distribution.entry(guesses).or_insert(0) += 1;
+    }
+
+    pub fn total_guesses(&self) -> usize {
+        self.distribution.iter().map(|(k, v)| k * v).sum()
+    }
+
+    pub fn mean(&self) -> f64 {
+        let sum_prod: usize = self.distribution.iter()
+            .map(|(k, v)| k * v)
+            .sum();
+        sum_prod as f64 / self.total_words as f64
+    }
+
+    pub fn variance(&self, mean: f64) -> f64 {
+        let sum_sq_diff: f64 = self.distribution.iter()
+            .map(|(&k, &v)| {
+                let diff = k as f64 - mean;
+                (diff * diff) * v as f64
+            })
+            .sum();
+        sum_sq_diff / self.total_words as f64
+    }
+
+    pub fn min_max(&self) -> (usize, usize) {
+        let min = *self.distribution.keys().min().unwrap_or(&0);
+        let max = *self.distribution.keys().max().unwrap_or(&0);
+        (min, max)
+    }
+}
 
 /// A unified struct holding all necessary state for a policy decision.
 pub struct PolicyState<'a> {
@@ -23,22 +71,31 @@ struct SimContext<'a> {
     all_candidates: &'a [[u8; N_CHARS]],
     c_idx_to_g_idx_map: &'a Vec<usize>,
     memo: Option<&'a MemoCache>,
+    stats: SimStats,
 }
 
 impl<'a> SimContext<'a> {
 
     /// The core recursive function to compute the total guesses for a given heuristic.
-    fn simulate_policy(
+    fn run(
         &mut self,
         candidates: &BitVec<u64, Lsb0>,
+        current_depth: usize,
         find_guess_fn: PolicyFn,
-    ) -> usize {
+    ) {
         let n_candidates = candidates.count_ones();
 
         // Base Cases
         assert!(n_candidates > 0);
-        if n_candidates == 1 { return 1; }
-        if n_candidates == 2 { return 3; }
+        if n_candidates == 1 {
+            self.stats.inc(current_depth);
+            return;
+        }
+        if n_candidates == 2 {
+            self.stats.inc(current_depth);
+            self.stats.inc(current_depth + 1);
+            return;
+        }
 
         // Find the guess g_idx according to the heuristic policy π(C)
         let state = PolicyState {
@@ -50,7 +107,16 @@ impl<'a> SimContext<'a> {
             memo: self.memo,
         };
 
+        // Check if the guess is in the candidate set
         let guess_idx = find_guess_fn(&state);
+
+        // Check if the guess is in the candidate set (green response)
+        for c_idx in candidates.iter_ones() {
+            if self.c_idx_to_g_idx_map[c_idx] == guess_idx {
+                self.stats.inc(current_depth);
+                break;
+            }
+        }
 
         // Partition the set C based on the chosen guess g
         let partitions = generate_partitions(
@@ -58,12 +124,10 @@ impl<'a> SimContext<'a> {
             guess_idx, self.all_candidates.len()
         );
 
-        // Calculate Total Cost.
-        let mut total_cost = n_candidates;
+        // Recurse.
         for (partition_candidates, _) in partitions {
-            total_cost += self.simulate_policy(&partition_candidates, find_guess_fn);
+            self.run(&partition_candidates, current_depth+1, find_guess_fn);
         }
-        total_cost
     }
 }
 
@@ -132,10 +196,11 @@ pub fn simulate<'a>(
     c_idx_to_g_idx_map: &'a Vec<usize>,
     memo: Option<&'a MemoCache>,
     find_guess_fn: PolicyFn,
-) -> usize {
+) -> SimStats {
     let mut context = SimContext {
         response_cache, all_guesses, all_candidates,
-        c_idx_to_g_idx_map, memo
+        c_idx_to_g_idx_map, memo, stats: SimStats::new(),
     };
-    context.simulate_policy(initial_candidates, find_guess_fn)
+    context.run(initial_candidates, 1, find_guess_fn);
+    context.stats
 }

@@ -250,7 +250,7 @@ pub fn compute_optimal_move(
     let heuristic_cost = simulate(
         &initial_candidates, all_guesses, all_candidates,
         response_cache, &c_idx_to_g_idx, None, MIN_REMAINING_POLICY,
-    );
+    ).total_guesses();
     info!("Initial Heuristic Upper Bound (Beta): {}", heuristic_cost);
 
     // Sort guesses by heuristic to prioritize promising branches.
@@ -258,7 +258,7 @@ pub fn compute_optimal_move(
     let promising_guesses = filter_and_sort_guesses(
         all_guesses.as_slice(), response_cache,
         &initial_candidates, n_total_candidates, n_total_candidates,
-        heuristic_cost
+        heuristic_cost + 1
     );
     let total_tasks = promising_guesses.len();
     info!("Sorted {} promising guesses.", total_tasks);
