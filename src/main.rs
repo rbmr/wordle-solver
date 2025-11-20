@@ -1,67 +1,266 @@
+use std::collections::HashSet;
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use anyhow::{bail, Context};
 use bitvec::bitvec;
 use bitvec::order::Lsb0;
 use bitvec::vec::BitVec;
 use log::{info};
-use wordle_solver::resp::compute_response_cache;
-use wordle_solver::utils::{compute_cidx_to_gidx_map};
-use wordle_solver::sim::{max_frequency_hardmode_policy_wrapper, max_frequency_policy_wrapper, min_remaining_hardmode_policy_wrapper, min_remaining_policy_wrapper, simulate, PolicyFn};
+use clap::{Parser, Subcommand};
+use wordle_solver::cache::{compute_context_hash, just_save_cache, new_cache};
+use wordle_solver::policy::pick_optimal;
+use wordle_solver::resp::{compute_response_cache, get_resp, response_to_index, B, CORRECT_IDX, G, Y};
 use wordle_solver::solver::compute_optimal_move;
-use wordle_solver::words::{arr_to_word, words_to_arr, CANDIDATES, GUESSES};
+use wordle_solver::words::{arr_to_word, words_to_arr, CANDIDATES, GUESSES, N_CHARS};
 
-fn main() {
-    env_logger::init();
 
-    // Load words and convert them to Arrays
-    info!("Accessing candidate list...");
-    let candidates = words_to_arr(&CANDIDATES);
-    let n_candidates = candidates.len();
-
-    info!("Accessing guess list...");
-    let guesses = words_to_arr(&GUESSES);
-
-    // Compute caches and initial candidates
-    let response_cache = compute_response_cache(&guesses, &candidates);
-    let initial_candidates: BitVec<u64, Lsb0> = bitvec![u64, Lsb0; 1; n_candidates];
-    let c_idx_to_g_idx_map = compute_cidx_to_gidx_map(&candidates, &guesses);
-
-    info!("Starting Heuristic Simulations:");
-
-    let policies: [(&str, PolicyFn); 4] = [
-        ("1. Min Remaining (Normal Mode)", min_remaining_policy_wrapper),
-        ("2. Max Frequency (Normal Mode)", max_frequency_policy_wrapper),
-        ("3. Min Remaining (Hard Mode)", min_remaining_hardmode_policy_wrapper),
-        ("4. Max Frequency (Hard Mode)", max_frequency_hardmode_policy_wrapper),
-    ];
-
-    for (name, find_guess_fn) in policies.iter() {
-        info!("-> Running simulation for {}", name);
-
-        let total_cost = simulate(
-            &initial_candidates,
-            &guesses,
-            &candidates,
-            &response_cache,
-            &c_idx_to_g_idx_map,
-            find_guess_fn,
-        );
-        let avg_guesses = total_cost as f64 / n_candidates as f64;
-
-        info!("   Total Cost: {}", total_cost);
-        info!("   Average Guesses: {:.4}", avg_guesses);
-    }
-
-    info!("Running Optimal Solver (Branch & Bound)...");
-
-    let (best_guess_idx, min_total_cost) = compute_optimal_move(
-        &response_cache, &candidates, &guesses,
-    );
-
-    let best_word = arr_to_word(&guesses[best_guess_idx]);
-    let avg_guesses = min_total_cost as f64 / n_candidates as f64;
-
-    info!("Optimal Result:");
-    info!("   Best Start Word: {} (Index {})", best_word, best_guess_idx);
-    info!("   Minimum Total Cost: {}", min_total_cost);
-    info!("   Minimum Average Guesses: {:.4}", avg_guesses);
+#[derive(Parser)]
+#[command(author, version, about, long_about = None)]
+struct Cli {
+    #[command(subcommand)]
+    command: Commands,
 }
 
+#[derive(Subcommand)]
+enum Commands {
+    /// Play the game using the optimal move cache
+    Play {
+        /// Path to the cache file
+        #[arg(short, long, default_value = "solver_cache.bin")]
+        cache: PathBuf,
+    },
+    /// Generate the optimal move cache
+    Generate {
+        /// Path to the cache file
+        #[arg(short, long, default_value = "solver_cache.bin")]
+        cache: PathBuf,
+    },
+
+}
+
+fn main() -> Result<(), anyhow::Error> {
+    env_logger::init();
+    let cli = Cli::parse();
+
+    // Load data
+    info!("Loading word lists...");
+    let candidates_arr = words_to_arr(&CANDIDATES);
+    let guesses_arr = words_to_arr(&GUESSES);
+    let context_hash = compute_context_hash(&guesses_arr, &candidates_arr);
+
+    // Compute basics
+    let response_cache = compute_response_cache(&guesses_arr, &candidates_arr);
+
+    match cli.command {
+        Commands::Play { cache } => {
+            play(
+                &cache,
+                context_hash,
+                candidates_arr,
+                guesses_arr,
+                response_cache
+            )?;
+        }
+        Commands::Generate { cache } => {
+            generate(
+                &cache,
+                context_hash,
+                candidates_arr,
+                guesses_arr,
+                response_cache
+            )?;
+        }
+    }
+
+    Ok(())
+}
+
+fn generate(
+    cache_path: &Path,
+    context_hash: u64,
+    candidates: Vec<[u8; N_CHARS]>,
+    guesses: Vec<[u8; N_CHARS]>,
+    response_cache: Box<[u8]>,
+) -> Result<(), anyhow::Error> {
+    info!("Entering GENERATE mode.");
+
+    // Load or Create Cache
+    let memo = if cache_path.exists() {
+        info!("Loading existing cache from {:?}", cache_path);
+        let loaded = wordle_solver::cache::load_cache(cache_path, context_hash)
+            .context("Failed to load existing cache. Ensure file is not corrupt and matches word lists.")?;
+        Arc::new(loaded)
+    } else {
+        info!("Creating new cache at {:?}", cache_path);
+        Arc::new(new_cache())
+    };
+
+    // Ctrl-C Handler
+    let memo_signal = memo.clone();
+    let path_signal = cache_path.to_path_buf();
+    ctrlc::set_handler(move || {
+        info!("Received SIGINT. Saving cache...");
+        just_save_cache(&memo_signal, &path_signal, context_hash);
+        std::process::exit(0);
+    }).expect("Error setting Ctrl-C handler");
+
+    info!("Starting solver...");
+    let (best_idx, cost) = compute_optimal_move(
+        &response_cache, &candidates, &guesses, &memo
+    );
+
+    let best_word = arr_to_word(&guesses[best_idx]);
+    info!("Optimization Complete.");
+    info!("Best Start Word: {} (Index {})", best_word, best_idx);
+    info!("Minimum Total Cost: {}", cost);
+
+    just_save_cache(&memo, cache_path, context_hash);
+
+    Ok(())
+}
+
+fn play(
+    cache_path: &Path,
+    context_hash: u64,
+    candidates: Vec<[u8; N_CHARS]>,
+    guesses: Vec<[u8; N_CHARS]>,
+    response_cache: Box<[u8]>,
+) -> Result<(), anyhow::Error> {
+    println!("--- Wordle Solver: PLAY Mode ---");
+
+    // Load Cache
+    if !cache_path.exists() {
+        bail!("Cache file not found at {:?}. Run 'generate' first.", cache_path);
+    }
+    let memo = wordle_solver::cache::load_cache(cache_path, context_hash)
+        .context("Failed to load cache")?;
+
+    let mut current_candidates = bitvec![u64, Lsb0; 1; candidates.len()];
+    let n_total = candidates.len();
+
+    loop {
+        let count = current_candidates.count_ones();
+        assert!(count > 0); // Should be guaranteed by get_user_response
+
+        // Print Remaining Candidates
+        print_candidates(&current_candidates, &candidates, None);
+
+        // Get Optimal Guess
+        println!("Thinking...");
+        let guess_idx = pick_optimal(
+            &current_candidates, &guesses,
+            n_total, &response_cache, &memo
+        );
+
+        let guess_idx = match guess_idx {
+            Ok(idx) => idx,
+            Err(e) => {
+                return Err(anyhow::anyhow!(e));
+            }
+        };
+
+        let guess_word_str = arr_to_word(&guesses[guess_idx]);
+        println!("------------------------------------------------");
+        println!("OPTIMAL GUESS: {guess_word_str}");
+        println!("------------------------------------------------");
+
+        // Request Response
+        let resp_idx = get_response(&guesses[guess_idx], &current_candidates, &candidates)?;
+
+        if resp_idx == CORRECT_IDX {
+            println!("Congratulations! \u{1F389}"); // Party popper
+            return Ok(());
+        }
+
+        // Filter Candidates
+        let mut next_candidates = bitvec![u64, Lsb0; 0; n_total];
+        for c_idx in current_candidates.iter_ones() {
+            let actual_resp = response_cache[guess_idx * n_total + c_idx] as usize;
+            if actual_resp == resp_idx {
+                next_candidates.set(c_idx, true);
+            }
+        }
+        current_candidates = next_candidates;
+    }
+}
+
+const DEFAULT_MAX_PRINT: usize = 512;
+
+fn print_candidates(candidates: &BitVec<u64, Lsb0>, all_candidates: &[[u8; 5]], max_print: Option<usize>) {
+    let count = candidates.count_ones();
+    println!("\nRemaining Candidates: {}", count);
+
+    let max_print = max_print.unwrap_or(DEFAULT_MAX_PRINT);
+
+    let mut printed = 0;
+    for idx in candidates.iter_ones() {
+        if printed >= max_print {
+            println!("and {} more...", count - printed);
+            break;
+        }
+        print!("{} ", arr_to_word(&all_candidates[idx]));
+        printed += 1;
+    }
+    println!();
+}
+
+fn get_response(
+    guess: &[u8; 5],
+    candidates: &BitVec<u64, Lsb0>,
+    all_candidates: &[[u8; 5]]
+) -> io::Result<usize> {
+    loop {
+        print!("Enter response (e.g., BGYBB) or 'exit': ");
+        io::stdout().flush()?;
+
+        let mut input = String::new();
+        io::stdin().read_line(&mut input)?;
+        let input = input.trim().to_uppercase();
+
+        if input == "EXIT" {
+            std::process::exit(0);
+        }
+
+        if input.len() != N_CHARS {
+            println!("Invalid length. Must be {N_CHARS} characters.");
+            continue;
+        }
+
+        let mut resp_bytes = [0u8; 5];
+        let mut invalid_chars: HashSet<char> = HashSet::new();
+        for (i, c) in input.chars().enumerate() {
+            match c {
+                'B' => resp_bytes[i] = B,
+                'Y' => resp_bytes[i] = Y,
+                'G' => resp_bytes[i] = G,
+                _ => { invalid_chars.insert(c); }
+            }
+        }
+        if invalid_chars.len() > 0 {
+            println!("Invalid characters: {:?}", invalid_chars);
+            continue;
+        }
+
+        let resp_idx = response_to_index(&resp_bytes);
+
+        // Validation: Is this response actually possible given remaining candidates?
+        // If the partition size for this response is 0, the user made a mistake.
+        let mut possible = false;
+        for c_idx in candidates.iter_ones() {
+            let cand = &all_candidates[c_idx];
+            let calculated = get_resp(guess, cand);
+            if response_to_index(&calculated) == resp_idx {
+                possible = true;
+                break;
+            }
+        }
+
+        if !possible {
+            println!("Impossible response! No remaining candidate would generate '{}' for guess '{}'. Check your input.", input, arr_to_word(guess));
+            continue;
+        }
+
+        return Ok(resp_idx);
+    }
+}

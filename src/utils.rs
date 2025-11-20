@@ -1,4 +1,6 @@
 use std::collections::{HashMap};
+use std::iter::Sum;
+use std::ops::Mul;
 use log::info;
 use crate::words::N_CHARS;
 
@@ -51,4 +53,13 @@ pub fn compute_cidx_to_gidx_map(
 
     // Return the fully computed cache.
     c_idx_to_g_idx_map
+}
+
+#[inline]
+pub fn sum_of_squares<T, I>(xs: I) -> T
+where
+    T: Mul<Output = T> + Sum + Copy,
+    I: IntoIterator<Item = T>,
+{
+    xs.into_iter().map(|x| x * x).sum()
 }

@@ -1,10 +1,10 @@
-use std::iter::Sum;
-use std::ops::Mul;
 use bitvec::order::Lsb0;
 use bitvec::vec::BitVec;
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use rayon::prelude::IntoParallelIterator;
-use crate::resp::{N_RESPONSES};
+use crate::cache::MemoCache;
+use crate::resp::{generate_partitions, get_partition_counts};
+use crate::utils::sum_of_squares;
 use crate::words::{letter_to_index, N_CHARS, N_LETTERS};
 
 /// Given a list of candidate indices, computes the number of candidates that contain each letter.
@@ -68,27 +68,15 @@ pub fn pick_max_freq(
         .expect("No guesses available.")
 }
 
-#[inline]
-pub fn sum_of_squares<T, I>(xs: I) -> T
-where
-    T: Mul<Output = T> + Sum + Copy,
-    I: IntoIterator<Item = T>,
-{
-    xs.into_iter().map(|x| x * x).sum()
-}
-
 pub fn get_min_remaining_score(
     candidates: &BitVec<u64, Lsb0>,
     response_cache: &[u8],
     g_idx: usize,
-    n_candidates_total: usize,
+    n_total_candidates: usize,
 ) -> usize {
-    let mut counts = [0usize; N_RESPONSES];
-    for c_idx in candidates.iter_ones() {
-        let resp_idx = response_cache[g_idx * n_candidates_total + c_idx] as usize;
-        counts[resp_idx] += 1;
-    }
-    sum_of_squares(counts)
+    sum_of_squares(get_partition_counts(
+        candidates, response_cache, g_idx, n_total_candidates
+    ))
 }
 
 pub fn pick_min_remaining(
@@ -106,4 +94,66 @@ pub fn pick_min_remaining(
         .min()
         .map(|(_, g_idx)| g_idx)
         .expect("No guesses available.")
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum OptimalGuessError {
+    #[error("The current set of candidates is not present in the cache.")]
+    CacheMiss,
+    #[error("Cache inconsistency: No guess matches the stored optimal cost {0}.")]
+    Inconsistency(usize),
+}
+
+/// Retrieves the optimal guess for the candidates from the cache, if present.
+pub fn pick_optimal(
+    candidates: &BitVec<u64, Lsb0>,
+    all_guesses: &[[u8; N_CHARS]],
+    n_candidates_total: usize,
+    response_cache: &[u8],
+    memo: &MemoCache,
+) -> Result<usize, OptimalGuessError> {
+
+    // Check if cache contains the solution for the current candidates.
+    let target_total_cost = match memo.get(candidates) {
+        Some(val) => *val,
+        None => return Err(OptimalGuessError::CacheMiss),
+    };
+
+    // Find the first guess that satisfies the optimal cost.
+    let n_candidates = candidates.count_ones();
+    let found_guess = (0..all_guesses.len())
+        .into_par_iter()
+        .find_map_first(|g_idx| {
+            let partitions = generate_partitions(
+                candidates, response_cache,
+                g_idx, n_candidates_total
+            );
+
+            let mut current_guess_cost = n_candidates;
+
+            for (partition_candidates, partition_size) in partitions {
+
+                if partition_size == 1 {
+                    current_guess_cost += 1;
+                } else if partition_size == 2 {
+                    current_guess_cost += 3;
+                } else {
+                    match memo.get(&partition_candidates) {
+                        Some(cost) => current_guess_cost += *cost,
+                        None => return None
+                    }
+                }
+            }
+
+            if current_guess_cost == target_total_cost {
+                Some(g_idx)
+            } else {
+                None
+            }
+        });
+
+    match found_guess {
+        Some(g_idx) => Ok(g_idx),
+        None => Err(OptimalGuessError::Inconsistency(target_total_cost)),
+    }
 }

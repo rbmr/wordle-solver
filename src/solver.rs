@@ -1,12 +1,13 @@
 use std::cmp::{Reverse};
-use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Mutex;
 use bitvec::bitvec;
 use bitvec::order::Lsb0;
 use bitvec::vec::BitVec;
 use log::info;
+use crate::cache::MemoCache;
 use crate::utils::{compute_cidx_to_gidx_map};
-use crate::resp::{N_RESPONSES, CORRECT_IDX};
+use crate::resp::{get_partition_counts, generate_partitions};
 use crate::sim::{simulate, MIN_REMAINING_POLICY};
 use crate::words::N_CHARS;
 
@@ -15,53 +16,6 @@ use crate::words::N_CHARS;
 #[inline]
 pub fn lower_bound(n_candidates: usize) -> usize {
     2 * n_candidates - 1
-}
-
-#[inline]
-pub fn get_partition_counts(
-    candidates: &BitVec<u64, Lsb0>,
-    response_cache: &[u8],
-    g_idx: usize,
-    n_total_candidates: usize,
-) -> [usize; N_RESPONSES] {
-    let mut counts = [0usize; N_RESPONSES];
-    for c_idx in candidates.iter_ones() {
-        let resp_idx = response_cache[g_idx * n_total_candidates + c_idx] as usize;
-        // SAFETY: get_unchecked is safe here per definition of response_to_index
-        unsafe { *counts.get_unchecked_mut(resp_idx) += 1; }
-    }
-    counts
-}
-
-#[inline]
-pub fn generate_partitions(
-    candidates: &BitVec<u64, Lsb0>,
-    response_cache: &[u8],
-    g_idx: usize,
-    n_total_candidates: usize,
-) -> Vec<(BitVec<u64, Lsb0>, usize)> {
-
-    // Create arrays for partitions and for counts.
-    let mut partitions: [Option<BitVec<u64, Lsb0>>; N_RESPONSES] =
-        std::array::from_fn(|_| None);
-    let mut counts = [0usize; N_RESPONSES];
-
-    // Iterate over all candidates to fill partitions.
-    for c_idx in candidates.iter_ones() {
-        let resp_idx = response_cache[g_idx * n_total_candidates + c_idx] as usize;
-        if resp_idx == CORRECT_IDX { continue; } // Don't create partition for Green response.
-        partitions[resp_idx]
-            .get_or_insert_with(|| bitvec![u64, Lsb0; 0; candidates.len()])
-            .set(c_idx, true);
-        counts[resp_idx] += 1;
-    }
-
-    // Collect all created BitVecs and their corresponding counts.
-    partitions
-        .into_iter()
-        .zip(counts)
-        .filter_map(|(p_opt, count)| p_opt.map(|p| (p, count)))
-        .collect()
 }
 
 /// Filter out guesses that don't provide information, or beat beta.
@@ -118,19 +72,14 @@ pub fn filter_and_sort_guesses(
     scored_guesses.iter().map(|(g_idx, _)| *g_idx).collect()
 }
 
-type MemoCache = HashMap<BitVec<u64, Lsb0>, usize>;
 
 struct SolverContext<'a> {
     response_cache: &'a [u8],
-    memo: MemoCache,
+    memo: &'a MemoCache,
     n_total_candidates: usize,
 }
 
 impl<'a> SolverContext<'a> {
-
-    fn new(response_cache: &'a [u8], n_total_candidates: usize) -> Self {
-        Self { response_cache, memo: HashMap::new(), n_total_candidates }
-    }
 
     /// Computes the minimum total cost for the candidate set if it is <= beta,
     /// otherwise returns usize::MAX.
@@ -147,8 +96,8 @@ impl<'a> SolverContext<'a> {
         if n_candidates == 2 { return 3; }
 
         // Memoization Check
-        if let Some(&cost) = self.memo.get(candidates) {
-            return cost;
+        if let Some(cost) = self.memo.get(candidates) {
+            return *cost;
         }
 
         // Lower Bound Check
@@ -210,8 +159,8 @@ impl<'a> SolverContext<'a> {
                 guess_lb += 1;
             } else if *partition_size == 2 {
                 guess_lb += 2;
-            } else if let Some(&cached_val) = self.memo.get(partition_candidates) {
-                guess_lb += cached_val;
+            } else if let Some(cached_val) = self.memo.get(partition_candidates) {
+                guess_lb += *cached_val;
             } else {
                 unresolved_partitions.push((partition_candidates, partition_size));
                 guess_lb += lower_bound(*partition_size)
@@ -242,6 +191,43 @@ impl<'a> SolverContext<'a> {
     }
 }
 
+
+/// Simple struct to manage cross-thread best guess state.
+struct BestGuess {
+    beta: AtomicUsize,
+    solution: Mutex<(usize, usize)>,
+}
+
+impl BestGuess {
+    fn new(heuristic_cost: usize) -> Self {
+        Self {
+            beta: AtomicUsize::new(heuristic_cost+1),
+            solution: Mutex::new((usize::MAX, usize::MAX)),
+        }
+    }
+
+    /// Fast check for the worker loops.
+    #[inline(always)]
+    fn get_beta(&self) -> usize {
+        self.beta.load(Ordering::Relaxed)
+    }
+
+    /// Thread-safe update.
+    /// Updates BOTH the atomic gatekeeper and the storage mutex.
+    fn update(&self, guess_idx: usize, cost: usize) {
+        self.beta.fetch_min(cost, Ordering::Relaxed);
+        let mut guard = self.solution.lock().unwrap();
+        if cost < guard.1 {
+            *guard = (guess_idx, cost);
+        }
+    }
+
+    /// Extract the final result.
+    fn unwrap(self) -> (usize, usize) {
+        self.solution.into_inner().unwrap()
+    }
+}
+
 /// Computes the optimal guess and its corresponding minimum total expected cost
 /// for the initial set of candidates.
 ///
@@ -250,74 +236,79 @@ pub fn compute_optimal_move(
     response_cache: &[u8],
     all_candidates: &[[u8; N_CHARS]],
     all_guesses: &[[u8; N_CHARS]],
+    memo: &MemoCache,
 ) -> (usize, usize) {
 
     // Setup
-    let n_candidates = all_candidates.len();
-    let n_guesses = all_guesses.len();
-    info!("Starting solver for {} candidates...", n_candidates);
-    let initial_candidates = bitvec![u64, Lsb0; 1; n_candidates];
+    let n_total_candidates = all_candidates.len();
+    let n_total_guesses = all_guesses.len();
+    info!("Starting solver for {} candidates...", n_total_candidates);
+    let initial_candidates = bitvec![u64, Lsb0; 1; n_total_candidates];
     let c_idx_to_g_idx = compute_cidx_to_gidx_map(all_candidates, all_guesses);
 
     // Compute initial heuristic cost using the "Min Remaining" heuristic.
     let heuristic_cost = simulate(
         &initial_candidates, all_guesses, all_candidates,
-        response_cache, &c_idx_to_g_idx, &MIN_REMAINING_POLICY,
+        response_cache, &c_idx_to_g_idx, None, MIN_REMAINING_POLICY,
     );
     info!("Initial Heuristic Upper Bound (Beta): {}", heuristic_cost);
 
-    // We use an AtomicUsize to share the best-known cost (beta) across threads.
-    let global_beta = AtomicUsize::new(heuristic_cost);
-    let processed_count = AtomicUsize::new(0);
-
     // Sort guesses by heuristic to prioritize promising branches.
-    let all_guesses: Vec<usize> = (0..n_guesses).into_iter().collect();
+    let all_guesses: Vec<usize> = (0..n_total_guesses).into_iter().collect();
     let promising_guesses = filter_and_sort_guesses(
         all_guesses.as_slice(), response_cache,
-        &initial_candidates, n_candidates, n_candidates,
+        &initial_candidates, n_total_candidates, n_total_candidates,
         heuristic_cost
     );
+    let total_tasks = promising_guesses.len();
+    info!("Sorted {} promising guesses.", total_tasks);
 
-    let best_result = promising_guesses
-        .clone()
-        .into_iter()
-        .map(|g_idx| {
+    // Setup cross-thread shared variables.
+    let processed_count = AtomicUsize::new(0);
+    let queue_cursor = AtomicUsize::new(0);
+    let best_guess = BestGuess::new(heuristic_cost);
+    info!("Starting parallel guess evaluation...");
 
-            let result = (|| {
+    rayon::scope(|s| {
+        let num_threads = rayon::current_num_threads();
+        for _ in 0..num_threads {
+            s.spawn(|_| {
+                loop {
+                    // Fetch the next item from the queue.
+                    let idx = queue_cursor.fetch_add(1, Ordering::Relaxed);
+                    if idx >= total_tasks { break; }
+                    let g_idx = promising_guesses[idx];
 
-                // Compute partitions for the guess
-                let partitions = generate_partitions(
-                    &initial_candidates, response_cache,
-                    g_idx, n_candidates
-                );
+                    // Process item
+                    let partitions = generate_partitions(
+                        &initial_candidates, response_cache,
+                        g_idx, n_total_candidates
+                    );
+                    let mut solver = SolverContext { response_cache, memo, n_total_candidates };
+                    let current_beta = best_guess.get_beta();
+                    let cost = solver.evaluate_guess(
+                        &partitions, &promising_guesses,
+                        current_beta, n_total_candidates
+                    );
 
-                // Get current beta
-                let current_beta = global_beta.load(Ordering::Relaxed);
+                    // Handle result
+                    if cost < current_beta {
+                        best_guess.update(g_idx, cost);
+                    }
 
-                // Solve exactly using local SolverContext.
-                let mut solver = SolverContext::new(response_cache, n_candidates);
-                let cost = solver.evaluate_guess(
-                    &partitions, &promising_guesses,
-                    current_beta, n_candidates
-                );
-
-                if cost < current_beta {
-                    global_beta.fetch_min(cost, Ordering::Relaxed);
+                    // Logging
+                    let finished = processed_count.fetch_add(1, Ordering::Relaxed) + 1;
+                    let current_beta = best_guess.get_beta();
+                    let pct = (finished as f64 / total_tasks as f64) * 100.0;
+                    info!("Progress: {:>5}/{} ({:>4.1}%) | Current Best: {} | Guess: {}, Cost: {}",
+                        finished, total_tasks, pct, current_beta, g_idx, cost
+                    );
                 }
+            })
+        };
+    });
 
-                (g_idx, cost)
-            })();
-
-            // Update progress and log
-            let finished = processed_count.fetch_add(1, Ordering::Relaxed) + 1;
-            let current_beta = global_beta.load(Ordering::Relaxed);
-            let pct = (finished as f64 / n_guesses as f64) * 100.0;
-            info!("Progress: {:>5}/{} ({:>5.1}%) | Current Best: {}", finished, n_guesses, pct, current_beta);
-
-            result
-        })
-        .min_by_key(|&(_, cost)| cost)
-        .unwrap();
+    let best_result = best_guess.unwrap();
 
     info!("Optimal solution found: Guess Index {}, Total Cost {}", best_result.0, best_result.1);
     best_result
