@@ -163,7 +163,7 @@ $$\hat{T}(S) = \begin{cases} T^*(S) & \text{if } S \text{ is in cache} \\ L(S) &
 
 ### Upper bounds on $T^*(C)$
 
-An upper bound on $T^*(C)$ can be computed using a greedy strategy (heuristic). Since we are minimizing cost, the total cost produced by any valid policy $V^\pi(C)$ is a valid upper bound on the true minimal total cost $V^*\pi(C)$.
+An upper bound on $T^*(C)$ can be computed using a greedy strategy (heuristic). Since we are minimizing cost, the total cost produced by any valid policy $T^\pi(C)$ is a valid upper bound on the true minimal total cost $T^*(C)$.
 
 Let $\pi(C)$ be a heuristic policy function that returns a guess $g$ for a set $C$. We can calculate the total cost by simulating the game tree using $h(C)$ recursively.
 
@@ -171,16 +171,12 @@ $$T^*(C) \leq UB(C)$$
 
 We use this $UB(C)$ to initialize our search. If we find a branch in our search tree with a lower bound exceeding $UB(C)$, we know that branch cannot possibly beat our heuristic, and we can prune it.
 
-### Upper bounds on $V^*(C)$
-
-An upper bound on $V^*(C)$ can be computed using a greedy strategy (heuristic). Since we are minimizing cost, a specific policy (even a suboptimal greedy one) provides a valid upper bound on the true minimal cost. These upper bounds can get relatively tight taking (only) polynomial time.
-
 ### Pruning
 
 To solve the problem within a reasonable timeframe, we employ a Branch and Bound strategy to eliminate (prune) guesses that cannot possibly yield an optimal solution. We track the best solution found so far for the current set $C$, denoted as $\beta$, and discard any guess $g$ whose lower bound cost exceeds this value.
 
 The pruning logic proceeds as follows:
-1. Initialization ($\beta$): We first compute an upper bound for $T^*(C)$ using a heuristic policy. We set our initial best-known cost $\beta$ to this value. $$\beta \leftarrow UB_{heuristic}(C)$$
+1. Initialization ($\beta$): We first compute an upper bound for $T^*(C)$ using a heuristic policy. We set our initial best-known cost $\beta$ to this value. $$\beta \leftarrow UB(C)$$
 2. Guess Ordering: We sort the allowed guesses $g \in G$ based on the heuristic score. Processing promising guesses first allows us to lower $\beta$ earlier in the search, increasing the effectiveness of pruning for subsequent guesses.
 3. Incremental Lower Bound Refinement: 
    1. For each guess $g$, we calculate an initial lower bound $T_{LB}(C, g)$ using the static lower bounds $L(S)$ (or memoized values if available) for all resulting partitions. $$T_{LB}(C, g) = |C| + \sum_{r \in \hat{R}} \hat{T}(C_{g,r})$$ 
