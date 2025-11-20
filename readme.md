@@ -7,7 +7,7 @@ The game of Wordle relies on a definition of the following components.
 Each of the following sets contain words of length $N_c$, with characters A-Z, where $N_c = 5$ in classic Wordle.
 - The set of allowed guesses $G$.
 - The set of (remaining) candidates $C$. We will denote the initial (complete) set of candidates using $C_0$, such that $C \subseteq C_0 \subseteq G$. We assume it is equally probable for all initial candidates to be the secret word.
-- The set of all possible responses $R$. Where each character in a response is either green, yellow, or gray. $|R| = 3^{N_c}$. We will the denote the all green response using $r_w$ ("win" response).
+- The set of all possible responses $R$. Where each character in a response is either green, yellow, or gray. We will the denote the all green response using $r_w$ ("win" response).
 
 ## Response function
 
@@ -40,6 +40,8 @@ function compute_response(secret, guess):
     
     return response
 ```
+
+Intuitively, the total number of distinct responses $|R| = 3^{N_c}$. But some of these responses are impossible. Namely, all $N_c - 1$ green $1$ yellow responses. 
 
 ## Partitions
 
