@@ -74,13 +74,13 @@ $$Cost(s) = \begin{cases} 0 & \text{if } s = \emptyset \\ 1 & \text{otherwise} \
 
   - The discount factor $\gamma = 1$
 
-The goal is to find an optimal policy, $\pi^*(s) \to g$, that minimizes the total expected cost (total expected number of guesses).
+The goal is to find an optimal policy, $\pi^{\ast}(s) \to g$, that minimizes the total expected cost (total expected number of guesses).
 
 Substituting these values into the Bellman optimality equations and simplifying gives:
 
-$$Q^*(C, g) = 1 + \sum_{r \in \hat{R} } \frac{|C_{g,r}|}{|C|} V^*(C_{g,r})$$
+$$Q^{\ast}(C, g) = 1 + \sum_{r \in \hat{R} } \frac{|C_{g,r}|}{|C|} V^{\ast}(C_{g,r})$$
 
-$$V^*(C) = \min_{g \in G} Q^*(C, g)$$
+$$V^{\ast}(C) = \min_{g \in G} Q^{\ast}(C, g)$$
 
 Where $\hat{R} = \{r \in R \mid r \neq r_w \}$ is the set of all possible responses excluding the win response.
 
@@ -104,43 +104,43 @@ These insights combined lead to the following algorithmic optimizations.
 
 To avoid the computational overhead and precision issues of floating point arithmetic, we reformulate the objective function. Instead of minimizing the expected number of guesses (which requires division), we minimize the total number of guesses required to solve for all candidates in $C$.
 
-Let $T^*(C)$ be the minimum total guesses for candidate set $C$. We can define the relationship to the expected value $V^*(C)$ as:
+Let $T^{\ast}(C)$ be the minimum total guesses for candidate set $C$. We can define the relationship to the expected value $V^{\ast}(C)$ as:
 
-$$T^*(C) = |C| \cdot V^*(C)$$
+$$T^{\ast}(C) = |C| \cdot V^{\ast}(C)$$
 
 We can then update the Bellman Equations as follows:
 
-$$T^*(C) = |C| \cdot V^*(C) = \min_{g \in G} \left( |C| \cdot 1 + |C| \sum_{r \in \hat{R}} \frac{|C_{g,r}|}{|C|} V^*(C_{g,r}) \right) = \min_{g \in G} \left( |C| + \sum_{r \in \hat{R}} T^*(C_{g,r}) \right)$$
+$$T^{\ast}(C) = |C| \cdot V^{\ast}(C) = \min_{g \in G} \left( |C| \cdot 1 + |C| \sum_{r \in \hat{R}} \frac{|C_{g,r}|}{|C|} V^{\ast}(C_{g,r}) \right) = \min_{g \in G} \left( |C| + \sum_{r \in \hat{R}} T^{\ast}(C_{g,r}) \right)$$
 
 This gives the integer-only recurrence relation. Note that the term $|C|$ represents the fact that the current guess $g$ adds exactly 1 guess to the path of every candidate currently in the set.
 
 Rewriting the recurrence relation in alternating recursive form we get:
 
-$$T^*(C) = \min_{g \in G} T^*(C, g)$$
+$$T^{\ast}(C) = \min_{g \in G} T^{\ast}(C, g)$$
 
-$$T^*(C, g) = |C| + \sum_{r \in \hat{R}} T^*(C_{g,r})$$
+$$T^{\ast}(C, g) = |C| + \sum_{r \in \hat{R}} T^{\ast}(C_{g,r})$$
 
 ### Base Cases
 
-- Empty Set: $T^*(\emptyset) = 0$
-- Single Word: $T^*(\{c\}) = 1$ 
+- Empty Set: $T^{\ast}(\emptyset) = 0$
+- Single Word: $T^{\ast}(\{c\}) = 1$ 
   - The word is guessed immediately.
-- Two Words: $T^*(\{c_1, c_2\}) = 3$.
+- Two Words: $T^{\ast}(\{c_1, c_2\}) = 3$.
   - 1 guess identifies the first word.
   - 2 guesses identifies the second. 
   - Total: $1+2=3$.
 
 ### Memoization
 
-We use a memoization to store T^*(C) for each set of candidates $C$ where $|C| > 2$.
+We use a memoization to store T^{\ast}(C) for each set of candidates $C$ where $|C| > 2$.
 
-### Lower bounds on $T^*(C)$
+### Lower bounds on $T^{\ast}(C)$
 
 In a minimization problem, we require admissible lower bounds (optimistic estimates) on the cost to perform pruning.
 
 Bound 1 (Information Theoretic):Each response from Wordle provides information that reduces the candidate set. To distinguish among $|C|$ possibilities requires at least $\log_{|R|}(|C|)$ responses in expectation. Converting this to total guesses:
 
-$$T^*(C) \geq |C| \cdot \log_{|R|} |C| = |C| \cdot \gamma \log_2 |C|$$
+$$T^{\ast}(C) \geq |C| \cdot \log_{|R|} |C| = |C| \cdot \gamma \log_2 |C|$$
 
 Where $\gamma = 1 / \log_2(|R|) = 1 / \log_2(3^{N_c}) = 1 / (N_c \cdot \log_2(3))$.
 
@@ -149,25 +149,25 @@ Bound 2 (Minimum Depth / Pigeonhole): We derive the absolute minimum number of t
 2. If the secret word happens to be $g$ we solve it in 1 guess. This happens for at most one candidate in $C$.  
 3. For the remaining $|C| - 1$ candidates, the guess $g$ is incorrect. Therefore, we need at least 1 additional guess to solve them. Giving a path length of at least 2.
 
-$$T^*(C) \geq 1 \cdot 1 + 2 \cdot (|C| - 1) = 2|C| - 1$$
+$$T^{\ast}(C) \geq 1 \cdot 1 + 2 \cdot (|C| - 1) = 2|C| - 1$$
 
 The tightest lower bound $L(C)$ is just the maximum of the two bounds. Assuming $N_c = 5$, Bound 2 is tighter than bound 1 for all relevant candidate set sizes. On top of this, its also more efficient to compute.
 
-Finally, we may compute a lower bound on the specific total cost of a guess $T^*(C,g)$ by using the actual computed optimal value $T^*(C_{g,r})$ where available (memoized), and the lower bound $L(C_{g,r})$ otherwise.
+Finally, we may compute a lower bound on the specific total cost of a guess $T^{\ast}(C,g)$ by using the actual computed optimal value $T^{\ast}(C_{g,r})$ where available (memoized), and the lower bound $L(C_{g,r})$ otherwise.
 
 $$T_{LB}(C, g) = |C| + \sum_{r \in \hat{R} } \hat{T}(C_{g,r})$$
 
 where:
 
-$$\hat{T}(S) = \begin{cases} T^*(S) & \text{if } S \text{ is in cache} \\ L(S) & \text{otherwise} \end{cases}$$
+$$\hat{T}(S) = \begin{cases} T^{\ast}(S) & \text{if } S \text{ is in cache} \\ L(S) & \text{otherwise} \end{cases}$$
 
-### Upper bounds on $T^*(C)$
+### Upper bounds on $T^{\ast}(C)$
 
-An upper bound on $T^*(C)$ can be computed using a greedy strategy (heuristic). Since we are minimizing cost, the total cost produced by any valid policy $T^\pi(C)$ is a valid upper bound on the true minimal total cost $T^*(C)$.
+An upper bound on $T^{\ast}(C)$ can be computed using a greedy strategy (heuristic). Since we are minimizing cost, the total cost produced by any valid policy $T^\pi(C)$ is a valid upper bound on the true minimal total cost $T^{\ast}(C)$.
 
 Let $\pi(C)$ be a heuristic policy function that returns a guess $g$ for a set $C$. We can calculate the total cost by simulating the game tree using $h(C)$ recursively.
 
-$$T^*(C) \leq UB(C)$$
+$$T^{\ast}(C) \leq UB(C)$$
 
 We use this $UB(C)$ to initialize our search. If we find a branch in our search tree with a lower bound exceeding $UB(C)$, we know that branch cannot possibly beat our heuristic, and we can prune it.
 
@@ -176,13 +176,13 @@ We use this $UB(C)$ to initialize our search. If we find a branch in our search 
 To solve the problem within a reasonable timeframe, we employ a Branch and Bound strategy to eliminate (prune) guesses that cannot possibly yield an optimal solution. We track the best solution found so far for the current set $C$, denoted as $\beta$, and discard any guess $g$ whose lower bound cost exceeds this value.
 
 The pruning logic proceeds as follows:
-1. Initialization ($\beta$): We first compute an upper bound for $T^*(C)$ using a heuristic policy. We set our initial best-known cost $\beta$ to this value. $$\beta \leftarrow UB(C)$$
+1. Initialization ($\beta$): We first compute an upper bound for $T^{\ast}(C)$ using a heuristic policy. We set our initial best-known cost $\beta$ to this value. $$\beta \leftarrow UB(C)$$
 2. Guess Ordering: We sort the allowed guesses $g \in G$ based on the heuristic score. Processing promising guesses first allows us to lower $\beta$ earlier in the search, increasing the effectiveness of pruning for subsequent guesses.
 3. Incremental Lower Bound Refinement: 
    1. For each guess $g$, we calculate an initial lower bound $T_{LB}(C, g)$ using the static lower bounds $L(S)$ (or memoized values if available) for all resulting partitions. $$T_{LB}(C, g) = |C| + \sum_{r \in \hat{R}} \hat{T}(C_{g,r})$$ 
    2. If $T_{LB}(C, g) \geq \beta$, the guess is immediately pruned. Otherwise, we incrementally refine it by computing the exact costs of the sub-problems.
    3. We iterate through the partitions $C_{g,r}$ sorted by size in descending order. We prioritize larger partitions because they contribute the most to the total cost, causing $T_{LB}$ to rise faster and triggering prune conditions earlier.
-   4. For each partition $C_{g,r}$: If the exact cost $T^*(C_{g,r})$ is not yet known (not in cache), we recursively compute it. We update the running lower bound for the guess by replacing the optimistic estimate $L(C_{g,r})$ with the actual cost $T^*(C_{g,r})$. $$T_{LB}(C, g) \leftarrow T_{LB}(C, g) + \left( T^*(C_{g,r}) - L(C_{g,r}) \right)$$
+   4. For each partition $C_{g,r}$: If the exact cost $T^{\ast}(C_{g,r})$ is not yet known (not in cache), we recursively compute it. We update the running lower bound for the guess by replacing the optimistic estimate $L(C_{g,r})$ with the actual cost $T^{\ast}(C_{g,r})$. $$T_{LB}(C, g) \leftarrow T_{LB}(C, g) + \left( T^{\ast}(C_{g,r}) - L(C_{g,r}) \right)$$
    5. Check: After every update, if $T_{LB}(C, g) \geq \beta$, we stop processing partitions for this guess and prune it immediately.
 4. Update Best:If we fully evaluate a guess $g$ (all partitions solved) and the final cost is strictly less than $\beta$, we update our best known solution:$$\beta \leftarrow T_{LB}(C, g)$$
 
@@ -227,7 +227,7 @@ $$\text{score}(g) = \sum_{\ell \in \text{unique}(g)} \text{freq}(\ell)$$
 
 The approximation of the optimal guess is the guess that maximizes the score:
 
-$$g^* = \arg\max_{g \in G} \text{score}(g)$$
+$$g^{\ast} = \arg\max_{g \in G} \text{score}(g)$$
 
 ### Pick Min Remaining
 
@@ -243,4 +243,4 @@ $$\text{score}(g) = \sum_{r \in R} |C_{g,r}|^2$$
 
 The approximation of the optimal guess is the guess that minimizes the score:
 
-$$g^* = \arg\min_{g \in G} \text{score}(g)$$
+$$g^{\ast} = \arg\min_{g \in G} \text{score}(g)$$
