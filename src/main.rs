@@ -6,7 +6,7 @@ use anyhow::{bail, Context};
 use bitvec::bitvec;
 use bitvec::order::Lsb0;
 use bitvec::vec::BitVec;
-use log::{info};
+use log::{info, warn};
 use clap::{Parser, Subcommand};
 use wordle_solver::cache::{compute_context_hash, just_save_cache, new_cache};
 use wordle_solver::graph::generate_comparison_image;
@@ -14,12 +14,20 @@ use wordle_solver::policy::pick_optimal;
 use wordle_solver::resp::{compute_response_cache, get_resp, response_to_index, B, CORRECT_IDX, G, Y};
 use wordle_solver::sim::{simulate, MAX_FREQUENCY_POLICY, MIN_REMAINING_POLICY};
 use wordle_solver::solver::compute_optimal_move;
-use wordle_solver::words::{arr_to_word, words_to_arr, CANDIDATES, GUESSES, N_CHARS};
+use wordle_solver::words::{arr_to_word, load_words, words_to_arr, CANDIDATES, GUESSES, N_CHARS};
 
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
 struct Cli {
+    /// Optional path to custom guesses file
+    #[arg(long = "guesses", short = 'g', global = true)]
+    guesses_file: Option<PathBuf>,
+
+    /// Optional path to custom candidates file
+    #[arg(long = "candidates", short = 'c', global = true)]
+    candidates_file: Option<PathBuf>,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -53,6 +61,30 @@ fn main() -> Result<(), anyhow::Error> {
 
     // Load data
     info!("Loading word lists...");
+    // Resolve Guesses
+    let mut guesses_set = if let Some(path) = &cli.guesses_file {
+        info!("Loading guesses from custom file: {:?}", path);
+        load_words(path, N_CHARS)?
+    } else {
+        (*GUESSES).clone()
+    };
+
+    // Resolve Candidates
+    let candidates_set = if let Some(path) = &cli.candidates_file {
+        info!("Loading candidates from custom file: {:?}", path);
+        load_words(path, N_CHARS)?
+    } else {
+        (*CANDIDATES).clone()
+    };
+
+    // Ensure Candidates is a subset of Guesses
+    let missing: Vec<_> = candidates_set.difference(&guesses_set).cloned().collect();
+    if !missing.is_empty() {
+        warn!("Adding {} missing candidates into list of guesses.", missing.len());
+        guesses_set.extend(missing);
+    }
+
+    // Convert into arrays
     let candidates_arr = words_to_arr(&CANDIDATES);
     let guesses_arr = words_to_arr(&GUESSES);
     let context_hash = compute_context_hash(&guesses_arr, &candidates_arr);
