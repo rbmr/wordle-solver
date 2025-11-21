@@ -10,9 +10,7 @@ use log::{info, warn};
 use clap::{Parser, Subcommand};
 use wordle_solver::cache::{compute_context_hash, just_save_cache, new_cache};
 use wordle_solver::graph::generate_comparison_image;
-use wordle_solver::policy::pick_optimal;
-use wordle_solver::game::resp::{compute_response_cache, get_resp, response_to_index, B, CORRECT_IDX, G, Y};
-use wordle_solver::sim::{simulate, MAX_FREQUENCY_POLICY, MIN_REMAINING_POLICY};
+use wordle_solver::resp::{compute_response_cache, get_resp, response_to_index, B, CORRECT_IDX, G, Y};
 use wordle_solver::solver::compute_optimal_move;
 use wordle_solver::words::{arr_to_word, load_words, words_to_arr, CANDIDATES, GUESSES, N_CHARS};
 
@@ -166,70 +164,70 @@ fn generate(
     Ok(())
 }
 
-fn play(
-    cache_path: &Path,
-    context_hash: u64,
-    candidates: Vec<[u8; N_CHARS]>,
-    guesses: Vec<[u8; N_CHARS]>,
-    response_cache: Box<[u8]>,
-) -> Result<(), anyhow::Error> {
-    println!("--- Wordle Solver: PLAY Mode ---");
-
-    // Load Cache
-    if !cache_path.exists() {
-        bail!("Cache file not found at {:?}. Run 'generate' first.", cache_path);
-    }
-    let memo = wordle_solver::cache::load_cache(cache_path, context_hash)
-        .context("Failed to load cache")?;
-
-    let mut current_candidates = bitvec![u64, Lsb0; 1; candidates.len()];
-    let n_total = candidates.len();
-
-    loop {
-        let count = current_candidates.count_ones();
-        assert!(count > 0); // Should be guaranteed by get_user_response
-
-        // Print Remaining Candidates
-        print_candidates(&current_candidates, &candidates, None);
-
-        // Get Optimal Guess
-        println!("Thinking...");
-        let guess_idx = pick_optimal(
-            &current_candidates, &guesses,
-            n_total, &response_cache, &memo
-        );
-
-        let guess_idx = match guess_idx {
-            Ok(idx) => idx,
-            Err(e) => {
-                return Err(anyhow::anyhow!(e));
-            }
-        };
-
-        let guess_word_str = arr_to_word(&guesses[guess_idx]);
-        println!("------------------------------------------------");
-        println!("OPTIMAL GUESS: {guess_word_str}");
-        println!("------------------------------------------------");
-
-        // Request Response
-        let resp_idx = get_response(&guesses[guess_idx], &current_candidates, &candidates)?;
-
-        if resp_idx == CORRECT_IDX {
-            println!("Congratulations! \u{1F389}"); // Party popper
-            return Ok(());
-        }
-
-        // Filter Candidates
-        let mut next_candidates = bitvec![u64, Lsb0; 0; n_total];
-        for c_idx in current_candidates.iter_ones() {
-            let actual_resp = response_cache[guess_idx * n_total + c_idx] as usize;
-            if actual_resp == resp_idx {
-                next_candidates.set(c_idx, true);
-            }
-        }
-        current_candidates = next_candidates;
-    }
-}
+// fn play(
+//     cache_path: &Path,
+//     context_hash: u64,
+//     candidates: Vec<[u8; N_CHARS]>,
+//     guesses: Vec<[u8; N_CHARS]>,
+//     response_cache: Box<[u8]>,
+// ) -> Result<(), anyhow::Error> {
+//     println!("--- Wordle Solver: PLAY Mode ---");
+//
+//     // Load Cache
+//     if !cache_path.exists() {
+//         bail!("Cache file not found at {:?}. Run 'generate' first.", cache_path);
+//     }
+//     let memo = wordle_solver::cache::load_cache(cache_path, context_hash)
+//         .context("Failed to load cache")?;
+//
+//     let mut current_candidates = bitvec![u64, Lsb0; 1; candidates.len()];
+//     let n_total = candidates.len();
+//
+//     loop {
+//         let count = current_candidates.count_ones();
+//         assert!(count > 0); // Should be guaranteed by get_user_response
+//
+//         // Print Remaining Candidates
+//         print_candidates(&current_candidates, &candidates, None);
+//
+//         // Get Optimal Guess
+//         println!("Thinking...");
+//         let guess_idx = pick_optimal(
+//             &current_candidates, &guesses,
+//             n_total, &response_cache, &memo
+//         );
+//
+//         let guess_idx = match guess_idx {
+//             Ok(idx) => idx,
+//             Err(e) => {
+//                 return Err(anyhow::anyhow!(e));
+//             }
+//         };
+//
+//         let guess_word_str = arr_to_word(&guesses[guess_idx]);
+//         println!("------------------------------------------------");
+//         println!("OPTIMAL GUESS: {guess_word_str}");
+//         println!("------------------------------------------------");
+//
+//         // Request Response
+//         let resp_idx = get_response(&guesses[guess_idx], &current_candidates, &candidates)?;
+//
+//         if resp_idx == CORRECT_IDX {
+//             println!("Congratulations! \u{1F389}"); // Party popper
+//             return Ok(());
+//         }
+//
+//         // Filter Candidates
+//         let mut next_candidates = bitvec![u64, Lsb0; 0; n_total];
+//         for c_idx in current_candidates.iter_ones() {
+//             let actual_resp = response_cache[guess_idx * n_total + c_idx] as usize;
+//             if actual_resp == resp_idx {
+//                 next_candidates.set(c_idx, true);
+//             }
+//         }
+//         current_candidates = next_candidates;
+//     }
+// }
 
 const DEFAULT_MAX_PRINT: usize = 512;
 

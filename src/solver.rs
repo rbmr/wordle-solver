@@ -6,13 +6,13 @@ use bitvec::bitvec;
 use bitvec::order::Lsb0;
 use bitvec::vec::BitVec;
 use log::info;
-use crate::game::sim::simulate_strategy;
-use crate::solve::cache::{compute_context_hash, MemoCache};
+use crate::sim::simulate_strategy;
+use crate::cache::{compute_context_hash, MemoCache};
 use crate::utils::format_bytes;
-use crate::game::words::N_CHARS;
-use crate::solve::build::StrategyBuilder;
-use crate::solve::policy::MinRemainingPolicy;
-use crate::solve::utils::{generate_partitions, get_partition_counts};
+use crate::words::N_CHARS;
+use crate::build::StrategyBuilder;
+use crate::part::{generate_partitions, get_partition_counts};
+use crate::policy::MinRemainingPolicy;
 
 /// Precomputes a mapping from a `candidate_index` to its corresponding `guess_index`.
 pub fn compute_cidx_to_gidx_map(
@@ -195,7 +195,7 @@ impl<'a> SolverContext<'a> {
             if *partition_size == 1 {
                 guess_lb += 1;
             } else if *partition_size == 2 {
-                guess_lb += 2;
+                guess_lb += 3;
             } else if let Some(cached_val) = self.memo.get(partition_candidates) {
                 guess_lb += *cached_val;
             } else {
@@ -284,7 +284,7 @@ pub fn compute_optimal_move(
     let c_idx_to_g_idx = compute_cidx_to_gidx_map(all_candidates, all_guesses);
 
     // Compute initial heuristic cost using the "Min Remaining" heuristic.
-    let policy = MinRemainingPolicy { response_cache, n_total_candidates };
+    let policy = MinRemainingPolicy { response_cache, n_total_candidates, n_total_guesses };
     let context_hash = compute_context_hash(all_guesses, all_candidates);
     let strat = StrategyBuilder::new(
         response_cache, n_total_candidates,
@@ -349,6 +349,7 @@ pub fn compute_optimal_move(
     });
 
     let best_result = best_guess.unwrap();
+    memo.insert(initial_candidates.clone(), best_result.1);
 
     info!("Optimal solution found: Guess Index {}, Total Cost {}", best_result.0, best_result.1);
     best_result

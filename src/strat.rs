@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 /// A single node in the strategy DAG.
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct StrategyNode {
+pub struct PolicyNode {
     /// The index of the guess in the sorted guesses list.
     pub guess: usize,
     pub children: HashMap<String, usize>,
@@ -14,16 +14,16 @@ pub struct StrategyNode {
 
 /// The root container for the strategy.
 #[derive(Serialize, Deserialize, Debug)]
-pub struct Strategy {
-    /// A stable hash of the word lists used to generate the strategy.
+pub struct PolicyGraph {
+    /// A stable hash of the word lists used for this policy graph.
     pub context_hash: u64,
     /// The index of the starting node in the nodes list.
     pub root: usize,
     /// The flat list of all nodes.
-    pub nodes: Vec<StrategyNode>,
+    pub nodes: Vec<PolicyNode>,
 }
 
-impl Strategy {
+impl PolicyGraph {
     pub fn to_json_file(&self, path: &Path) -> anyhow::Result<()> {
         let file = File::create(path)?;
         let writer = BufWriter::new(file);

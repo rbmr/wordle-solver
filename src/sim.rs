@@ -1,9 +1,9 @@
 use std::collections::BTreeMap;
 use log::warn;
 use rayon::prelude::*;
-use crate::game::resp::{get_resp, CORRECT};
-use crate::game::strat::Strategy;
-use crate::game::words::{arr_to_word, N_CHARS};
+use crate::resp::{get_resp, CORRECT};
+use crate::strat::PolicyGraph;
+use crate::words::{arr_to_word, N_CHARS};
 
 pub struct SimStats {
     pub total_words: usize,
@@ -58,7 +58,7 @@ impl SimStats {
 /// Simulates a single game for a specific answer using the provided strategy.
 /// Returns the number of guesses taken, or None if the strategy fails (e.g. loops or incomplete).
 pub fn trace_game(
-    strategy: &Strategy,
+    strategy: &PolicyGraph,
     answer: &[u8; N_CHARS],
     all_guesses: &[[u8; N_CHARS]],
 ) -> Option<usize> {
@@ -95,7 +95,7 @@ pub fn trace_game(
 
 /// Runs a full simulation of the strategy against all provided candidate answers.
 pub fn simulate_strategy(
-    strategy: &Strategy,
+    strategy: &PolicyGraph,
     answers: &[[u8; N_CHARS]],
     all_guesses: &[[u8; N_CHARS]],
 ) -> SimStats {

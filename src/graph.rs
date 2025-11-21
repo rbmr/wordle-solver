@@ -5,7 +5,7 @@ use plotters::prelude::*;
 use std::path::Path;
 use plotters::style::text_anchor::{HPos, Pos, VPos};
 use plotters::prelude::SegmentValue;
-use crate::game::sim::SimStats;
+use crate::sim::SimStats;
 
 const CANVAS_WIDTH: u32 = 800;
 const ROW_HEIGHT: u32 = 300;

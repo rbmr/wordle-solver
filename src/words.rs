@@ -75,14 +75,14 @@ pub fn arr_to_word(arr: &[u8; N_CHARS]) -> String {
 /// The default list of candidate words.
 pub static CANDIDATES: Lazy<HashSet<String>> = Lazy::new(|| {
     debug!("One-time parse: Loading default candidates...");
-    let file_contents = include_str!("../../words/candidates.txt");
+    let file_contents = include_str!("../words/candidates.txt");
     parse_words(file_contents, N_CHARS)
 });
 
 /// The default list of words to guess from.
 pub static GUESSES: Lazy<HashSet<String>> = Lazy::new(|| {
     debug!("One-time parse: Loading default guesses...");
-    let file_contents = include_str!("../../words/guesses.txt");
+    let file_contents = include_str!("../words/guesses.txt");
     parse_words(file_contents, N_CHARS)
 });
 

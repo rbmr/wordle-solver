@@ -1,14 +1,14 @@
+use rayon::iter::ParallelIterator;
 use bitvec::order::Lsb0;
 use bitvec::vec::BitVec;
-use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use rayon::prelude::IntoParallelIterator;
-use crate::solve::cache::MemoCache;
+use crate::cache::MemoCache;
+use crate::part::{generate_partitions, get_partition_counts};
 use crate::utils::sum_of_squares;
-use crate::game::words::{letter_to_index, N_CHARS, N_LETTERS};
-use crate::solve::utils::{generate_partitions, get_partition_counts};
+use crate::words::{letter_to_index, N_CHARS, N_LETTERS};
 
 pub trait Policy: Sync + Send {
-    fn pick(&self, candidates: &BitVec<u64, Lsb0>, guess_indices: &[usize]) -> usize;
+    fn pick(&self, candidates: &BitVec<u64, Lsb0>) -> usize;
 }
 
 pub struct MaxFreqPolicy<'a> {
@@ -19,14 +19,14 @@ pub struct MaxFreqPolicy<'a> {
 impl<'a> Policy for MaxFreqPolicy<'a> {
 
     #[inline]
-    fn pick(&self, candidates: &BitVec<u64, Lsb0>, guess_indices: &[usize]) -> usize {
+    fn pick(&self, candidates: &BitVec<u64, Lsb0>) -> usize {
         let candidate_indices: Vec<usize> = candidates.iter_ones().collect();
         let letter_frequencies: [usize; N_LETTERS] =
             compute_letter_frequencies(&candidate_indices, self.all_candidates);
 
-        guess_indices
-            .par_iter()
-            .map(|&g_idx| {
+        (0..self.all_guesses.len())
+            .into_par_iter()
+            .map(|g_idx| {
                 let guess_word = &self.all_guesses[g_idx];
                 let score = get_max_freq_score(guess_word, &letter_frequencies);
                 (usize::MAX - score, g_idx)
@@ -40,15 +40,16 @@ impl<'a> Policy for MaxFreqPolicy<'a> {
 pub struct MinRemainingPolicy<'a> {
     pub response_cache: &'a [u8],
     pub n_total_candidates: usize,
+    pub n_total_guesses: usize,
 }
 
 impl<'a> Policy for MinRemainingPolicy<'a> {
 
     #[inline]
-    fn pick(&self, candidates: &BitVec<u64, Lsb0>, guess_indices: &[usize]) -> usize {
-        guess_indices
-            .par_iter()
-            .map(|&g_idx| {
+    fn pick(&self, candidates: &BitVec<u64, Lsb0>) -> usize {
+        (0..self.n_total_guesses)
+            .into_par_iter()
+            .map(|g_idx| {
                 let score = get_min_remaining_score(
                     candidates, self.response_cache,
                     g_idx, self.n_total_candidates
@@ -71,7 +72,7 @@ pub struct OptimalPolicy<'a> {
 impl<'a> Policy for OptimalPolicy<'a> {
 
     #[inline]
-    fn pick(&self, candidates: &BitVec<u64, Lsb0>, guess_indices: &[usize]) -> usize {
+    fn pick(&self, candidates: &BitVec<u64, Lsb0>) -> usize {
        // Check if cache contains the solution for the current candidates.
         let target_total_cost = match self.memo.get(candidates) {
             Some(val) => *val,
@@ -80,9 +81,9 @@ impl<'a> Policy for OptimalPolicy<'a> {
         let n_candidates = candidates.count_ones();
 
         // Find the first guess that satisfies the optimal cost.
-        guess_indices
+        (0..self.all_guesses.len())
             .into_par_iter()
-            .find_map_first(|&g_idx| {
+            .find_map_first(|g_idx| {
                 let partitions = generate_partitions(
                     candidates, self.response_cache,
                     g_idx, self.n_total_candidates

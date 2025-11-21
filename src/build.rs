@@ -2,11 +2,11 @@ use std::collections::HashMap;
 use bitvec::order::Lsb0;
 use bitvec::prelude::BitVec;
 use log::info;
-use crate::game::resp::index_to_response;
-use crate::game::strat::{Strategy, StrategyNode};
-use crate::game::words::{arr_to_word};
-use crate::solve::policy::Policy;
-use crate::solve::utils::{get_partitions};
+use crate::part::get_partitions;
+use crate::resp::index_to_response;
+use crate::strat::{PolicyGraph, PolicyNode};
+use crate::words::{arr_to_word};
+use crate::policy::Policy;
 
 pub struct StrategyBuilder<'a, P:Policy> {
     response_cache: &'a [u8],
@@ -14,7 +14,7 @@ pub struct StrategyBuilder<'a, P:Policy> {
     policy: P,
     all_guess_indices: Vec<usize>,
     visited: HashMap<BitVec<u64, Lsb0>, usize>, // Candidate Set -> Node Index
-    nodes: Vec<StrategyNode>,
+    nodes: Vec<PolicyNode>,
 }
 
 impl<'a, P: Policy> StrategyBuilder<'a, P> {
@@ -36,12 +36,12 @@ impl<'a, P: Policy> StrategyBuilder<'a, P> {
         }
     }
 
-    pub fn build(mut self, initial_candidates: &BitVec<u64, Lsb0>, context_hash: u64) -> Strategy {
+    pub fn build(mut self, initial_candidates: &BitVec<u64, Lsb0>, context_hash: u64) -> PolicyGraph {
         info!("Building Strategy...");
         let root_idx = self.process_state(initial_candidates.clone());
         info!("Strategy built. Nodes: {}", self.nodes.len());
 
-        Strategy {
+        PolicyGraph {
             context_hash,
             root: root_idx,
             nodes: self.nodes,
@@ -55,7 +55,7 @@ impl<'a, P: Policy> StrategyBuilder<'a, P> {
         }
 
         // Ask Policy for the best guess
-        let guess_idx = self.policy.pick(&candidates, self.all_guess_indices.as_slice());
+        let guess_idx = self.policy.pick(&candidates);
 
         // Generate Partitions
         let partitions = get_partitions(
@@ -77,7 +77,7 @@ impl<'a, P: Policy> StrategyBuilder<'a, P> {
         }
 
         // Construct the node
-        let node = StrategyNode{
+        let node = PolicyNode {
             guess: guess_idx,
             children: children_map,
         };

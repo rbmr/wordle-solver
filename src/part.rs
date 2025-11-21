@@ -5,42 +5,11 @@ use bitvec::order::Lsb0;
 use bitvec::prelude::BitVec;
 use log::info;
 use rayon::prelude::ParallelSliceMut;
-use crate::game::resp::{get_resp, response_to_index, CORRECT_IDX, N_RESPONSES};
-use crate::game::words::N_CHARS;
+use crate::resp::{get_resp, response_to_index, CORRECT_IDX, N_RESPONSES};
+use crate::words::N_CHARS;
 use crate::utils::format_bytes;
 
-/// Precomputes responses for all (guess, candidate) pairs.
-pub fn compute_response_cache(
-    guesses: &[[u8; N_CHARS]],
-    candidates: &[[u8; N_CHARS]],
-) -> Box<[u8]> {
 
-    info!("Building response cache...");
-    let n_guesses = guesses.len();
-    let n_candidates = candidates.len();
-    let element_count = n_guesses * n_candidates;
-    let mut cache_data = vec![0u8; element_count];
-
-    cache_data
-        .par_chunks_mut(n_candidates) // each slice has length n_candidates (one row)
-        .enumerate() // enumerate to get g_idx
-        .for_each(|(g_idx, row_slice)| {
-            let guess = &(guesses[g_idx]);
-            for (c_idx, slot) in row_slice.iter_mut().enumerate() {
-                let candidate = &candidates[c_idx];
-                let resp = get_resp(guess, candidate);
-                *slot = response_to_index(&resp) as u8;
-            }
-        });
-
-    // Log the final cache size
-    let element_size = size_of::<u8>();
-    let total_bytes = element_count * element_size;
-    info!("Response cache built successfully. (~{})", format_bytes(total_bytes as f32));
-
-    // Return the fully computed cache.
-    cache_data.into_boxed_slice()
-}
 
 #[inline]
 pub fn get_partition_counts(
