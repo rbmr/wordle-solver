@@ -55,16 +55,15 @@ pub fn load_words(words_file: &Path, n_chars: usize) -> Result<HashSet<String>, 
 pub fn words_to_arr(words: &HashSet<String>) -> Vec<[u8; N_CHARS]> {
     let mut sorted_words: Vec<&String> = words.iter().collect();
     sorted_words.sort();
+    sorted_words.into_iter().map(|word| word_to_arr(word)).collect()
+}
 
-    let mut data = Vec::with_capacity(words.len());
-    for word in sorted_words {
-        assert_eq!(word.len(), N_CHARS, "Unexpected word len: expected {}, found {}", N_CHARS, word.len());
-        let bytes = word.as_bytes();
-        let mut fixed_arr = [0u8; N_CHARS];
-        fixed_arr.copy_from_slice(&bytes[0..N_CHARS]);
-        data.push(fixed_arr);
-    }
-    data
+pub fn word_to_arr(word: &str) -> [u8; N_CHARS] {
+    assert_eq!(word.len(), N_CHARS, "Unexpected word len: expected {}, found {}", N_CHARS, word.len());
+    let bytes = word.as_bytes();
+    let mut fixed_arr = [0u8; N_CHARS];
+    fixed_arr.copy_from_slice(&bytes[0..N_CHARS]);
+    fixed_arr
 }
 
 pub fn arr_to_word(arr: &[u8; N_CHARS]) -> String {
@@ -76,13 +75,37 @@ pub fn arr_to_word(arr: &[u8; N_CHARS]) -> String {
 /// The default list of candidate words.
 pub static CANDIDATES: Lazy<HashSet<String>> = Lazy::new(|| {
     debug!("One-time parse: Loading default candidates...");
-    let file_contents = include_str!("../words/candidates.txt");
+    let file_contents = include_str!("../../words/candidates.txt");
     parse_words(file_contents, N_CHARS)
 });
 
 /// The default list of words to guess from.
 pub static GUESSES: Lazy<HashSet<String>> = Lazy::new(|| {
     debug!("One-time parse: Loading default guesses...");
-    let file_contents = include_str!("../words/guesses.txt");
+    let file_contents = include_str!("../../words/guesses.txt");
     parse_words(file_contents, N_CHARS)
 });
+
+/// A stable, cross-platform hash function (FNV-1a 64-bit).
+pub fn compute_stable_hash(guesses: &[[u8; N_CHARS]], candidates: &[[u8; N_CHARS]]) -> u64 {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    const PRIME: u64 = 0x100000001b3;
+
+    fn add_byte(h: &mut u64, b: u8) {
+        *h ^= b as u64;
+        *h = h.wrapping_mul(PRIME);
+    }
+
+    // Hash lengths first to prevent boundary collisions
+    for byte in guesses.len().to_le_bytes() { add_byte(&mut hash, byte); }
+    for byte in candidates.len().to_le_bytes() { add_byte(&mut hash, byte); }
+
+    // Hash content
+    for word in guesses {
+        for &b in word { add_byte(&mut hash, b); }
+    }
+    for word in candidates {
+        for &b in word { add_byte(&mut hash, b); }
+    }
+    hash
+}

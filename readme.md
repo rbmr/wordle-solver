@@ -132,7 +132,7 @@ $$T^{\ast}(C, g) = |C| + \sum_{r \in \hat{R}} T^{\ast}(C_{g,r})$$
 
 ### Memoization
 
-We use a memoization to store T^{\ast}(C) for each set of candidates $C$ where $|C| > 2$.
+We use a memoization to store $T^{\ast}(C)$ for each set of candidates $C$ where $|C| > 2$.
 
 ### Lower bounds on $T^{\ast}(C)$
 

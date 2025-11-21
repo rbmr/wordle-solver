@@ -1,15 +1,52 @@
 use std::cmp::{Reverse};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 use bitvec::bitvec;
 use bitvec::order::Lsb0;
 use bitvec::vec::BitVec;
 use log::info;
-use crate::cache::MemoCache;
-use crate::utils::{compute_cidx_to_gidx_map};
-use crate::resp::{get_partition_counts, generate_partitions};
-use crate::sim::{simulate, MIN_REMAINING_POLICY};
-use crate::words::N_CHARS;
+use crate::game::sim::simulate_strategy;
+use crate::solve::cache::{compute_context_hash, MemoCache};
+use crate::utils::format_bytes;
+use crate::game::words::N_CHARS;
+use crate::solve::build::StrategyBuilder;
+use crate::solve::policy::MinRemainingPolicy;
+use crate::solve::utils::{generate_partitions, get_partition_counts};
+
+/// Precomputes a mapping from a `candidate_index` to its corresponding `guess_index`.
+pub fn compute_cidx_to_gidx_map(
+    all_candidates: &[[u8; N_CHARS]],
+    all_guesses: &[[u8; N_CHARS]],
+) -> Vec<usize> {
+
+    info!("Building candidate to guess mapping...");
+    let n_guesses = all_guesses.len();
+    let n_candidates = all_candidates.len();
+
+    // Get the mappings from guess words to guess indices.
+    let mut guess_word_to_index: HashMap<&[u8; N_CHARS], usize> = HashMap::with_capacity(n_guesses);
+    for (i, word) in all_guesses.iter().enumerate() {
+        guess_word_to_index.insert(word, i);
+    }
+
+    // Create the mapping from candidate indices to guess indices.
+    let c_idx_to_g_idx_map: Vec<usize> = (0..n_candidates)
+        .map(|c_idx| {
+            let candidate_word = &all_candidates[c_idx];
+            *guess_word_to_index
+                .get(candidate_word)
+                .expect("A candidate word was not found in the guess list. Check word files.")
+        })
+        .collect();
+
+    // Log the final cache size
+    let total_bytes = c_idx_to_g_idx_map.len() * size_of::<usize>();
+    info!("candidate to guess mapping built successfully. (~{})", format_bytes(total_bytes as f32));
+
+    // Return the fully computed cache.
+    c_idx_to_g_idx_map
+}
 
 /// Computes a lower bound on the optimal expected guesses for a given partition size.
 /// Only valid for n_candidates > 0
@@ -247,10 +284,13 @@ pub fn compute_optimal_move(
     let c_idx_to_g_idx = compute_cidx_to_gidx_map(all_candidates, all_guesses);
 
     // Compute initial heuristic cost using the "Min Remaining" heuristic.
-    let heuristic_cost = simulate(
-        &initial_candidates, all_guesses, all_candidates,
-        response_cache, &c_idx_to_g_idx, None, MIN_REMAINING_POLICY,
-    ).total_guesses();
+    let policy = MinRemainingPolicy { response_cache, n_total_candidates };
+    let context_hash = compute_context_hash(all_guesses, all_candidates);
+    let strat = StrategyBuilder::new(
+        response_cache, n_total_candidates,
+        n_total_guesses, policy
+    ).build(&initial_candidates, context_hash);
+    let heuristic_cost = simulate_strategy(&strat, all_candidates, all_guesses).total_guesses();
     info!("Initial Heuristic Upper Bound (Beta): {}", heuristic_cost);
 
     // Sort guesses by heuristic to prioritize promising branches.

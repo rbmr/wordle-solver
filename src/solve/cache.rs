@@ -16,6 +16,7 @@ struct PersistedCache {
     context_hash: u64,
     data: MemoCache,
 }
+
 #[derive(Serialize)]
 struct PersistedCacheRef<'a> {
     context_hash: u64,

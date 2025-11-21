@@ -11,7 +11,7 @@ use clap::{Parser, Subcommand};
 use wordle_solver::cache::{compute_context_hash, just_save_cache, new_cache};
 use wordle_solver::graph::generate_comparison_image;
 use wordle_solver::policy::pick_optimal;
-use wordle_solver::resp::{compute_response_cache, get_resp, response_to_index, B, CORRECT_IDX, G, Y};
+use wordle_solver::game::resp::{compute_response_cache, get_resp, response_to_index, B, CORRECT_IDX, G, Y};
 use wordle_solver::sim::{simulate, MAX_FREQUENCY_POLICY, MIN_REMAINING_POLICY};
 use wordle_solver::solver::compute_optimal_move;
 use wordle_solver::words::{arr_to_word, load_words, words_to_arr, CANDIDATES, GUESSES, N_CHARS};
