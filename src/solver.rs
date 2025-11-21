@@ -4,6 +4,7 @@ use std::sync::Mutex;
 use bitvec::bitvec;
 use bitvec::order::Lsb0;
 use bitvec::vec::BitVec;
+use indicatif::{ProgressBar, ProgressStyle};
 use log::info;
 use crate::cache::MemoCache;
 use crate::resp::{get_partition_counts, generate_partitions, ResponseCache};
@@ -183,16 +184,18 @@ impl<'a> SolverContext<'a> {
 
 
 /// Simple struct to manage cross-thread best guess state.
-struct BestGuess {
+struct BestGuess<'a> {
     beta: AtomicUsize,
     solution: Mutex<(usize, usize)>,
+    pbar: &'a ProgressBar,
 }
 
-impl BestGuess {
-    fn new(heuristic_cost: usize) -> Self {
+impl<'a> BestGuess<'a> {
+    fn new(heuristic_cost: usize, pbar: &'a ProgressBar) -> Self {
         Self {
             beta: AtomicUsize::new(heuristic_cost+1),
             solution: Mutex::new((usize::MAX, usize::MAX)),
+            pbar
         }
     }
 
@@ -209,6 +212,8 @@ impl BestGuess {
         let mut guard = self.solution.lock().unwrap();
         if cost < guard.1 {
             *guard = (guess_idx, cost);
+            self.pbar.println(format!("New Best found: Cost {} (Guess {})", cost, guess_idx));
+            self.pbar.set_message(format!("Best: {}", cost));
         }
     }
 
@@ -249,11 +254,18 @@ pub fn compute_optimal_move(
     let total_tasks = promising_guesses.len();
     info!("Sorted {} promising guesses.", total_tasks);
 
-    // Setup cross-thread shared variables.
-    let processed_count = AtomicUsize::new(0);
-    let queue_cursor = AtomicUsize::new(0);
-    let best_guess = BestGuess::new(heuristic_cost);
+    // Setup progress bar
     info!("Starting parallel guess evaluation...");
+    let pb = ProgressBar::new(total_tasks as u64);
+    pb.set_style(ProgressStyle::default_bar()
+        .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta}) {msg}")
+        .unwrap()
+        .progress_chars("#> "));
+    pb.set_message(format!("Best: {}", heuristic_cost));
+
+    // Setup cross-thread shared variables.
+    let queue_cursor = AtomicUsize::new(0);
+    let best_guess = BestGuess::new(heuristic_cost, &pb);
 
     rayon::scope(|s| {
         let num_threads = rayon::current_num_threads();
@@ -278,21 +290,13 @@ pub fn compute_optimal_move(
                     if cost < current_beta {
                         best_guess.update(g_idx, cost);
                     }
-
-                    // Logging
-                    let finished = processed_count.fetch_add(1, Ordering::Relaxed) + 1;
-                    let current_beta = best_guess.get_beta();
-                    let pct = (finished as f64 / total_tasks as f64) * 100.0;
-                    info!("Progress: {:>5}/{} ({:>4.1}%) | Current Best: {} | Guess: {}, Cost: {}",
-                        finished, total_tasks, pct, current_beta, g_idx, cost
-                    );
+                    pb.inc(1);
                 }
             })
         };
     });
-
+    pb.finish_with_message("Done");
     let best_result = best_guess.unwrap();
-
     info!("Optimal solution found: Guess Index {}, Total Cost {}", best_result.0, best_result.1);
     best_result
 }
