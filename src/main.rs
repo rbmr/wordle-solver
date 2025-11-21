@@ -10,12 +10,11 @@ use log::{info, warn};
 use clap::{Parser, Subcommand};
 use wordle_solver::cache::{compute_context_hash, just_save_cache, new_cache};
 use wordle_solver::graph::generate_comparison_image;
-use wordle_solver::policy::pick_optimal;
-use wordle_solver::resp::{compute_response_cache, get_resp, response_to_index, B, CORRECT_IDX, G, Y};
-use wordle_solver::sim::{simulate, MAX_FREQUENCY_POLICY, MIN_REMAINING_POLICY};
+use wordle_solver::strat::pick_optimal;
+use wordle_solver::resp::{compute_response_cache, get_resp, response_to_index, ResponseCache, B, CORRECT_IDX, G, Y};
+use wordle_solver::sim::{simulate, MaxFreqPolicy, MinRemainingPolicy, Policy, SimStats};
 use wordle_solver::solver::compute_optimal_move;
 use wordle_solver::words::{arr_to_word, load_words, words_to_arr, CANDIDATES, GUESSES, N_CHARS};
-
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -50,7 +49,7 @@ enum Commands {
     Compare {
         #[arg(short, long, default_value = "solver_cache.bin")]
         cache: PathBuf,
-        #[arg(short, long, default_value = "comparison.png")]
+        #[arg(short, long, default_value = "comparison.svg")]
         output: PathBuf,
     },
 }
@@ -66,7 +65,8 @@ fn main() -> Result<(), anyhow::Error> {
         info!("Loading guesses from custom file: {:?}", path);
         load_words(path, N_CHARS)?
     } else {
-        (*GUESSES).clone()
+        info!("Using default guesses list.");
+        GUESSES.clone()
     };
 
     // Resolve Candidates
@@ -74,47 +74,49 @@ fn main() -> Result<(), anyhow::Error> {
         info!("Loading candidates from custom file: {:?}", path);
         load_words(path, N_CHARS)?
     } else {
-        (*CANDIDATES).clone()
+        info!("Using default candidates list.");
+        CANDIDATES.clone()
     };
 
     // Ensure Candidates is a subset of Guesses
-    let missing: Vec<_> = candidates_set.difference(&guesses_set).cloned().collect();
+    let missing: Vec<String> = candidates_set.difference(&guesses_set).cloned().collect();
     if !missing.is_empty() {
         warn!("Adding {} missing candidates into list of guesses.", missing.len());
         guesses_set.extend(missing);
     }
 
     // Convert into arrays
-    let candidates_arr = words_to_arr(&CANDIDATES);
-    let guesses_arr = words_to_arr(&GUESSES);
-    let context_hash = compute_context_hash(&guesses_arr, &candidates_arr);
-
-    // Compute basics
-    let response_cache = compute_response_cache(&guesses_arr, &candidates_arr);
+    let all_candidates = words_to_arr(&candidates_set);
+    let all_guesses = words_to_arr(&guesses_set);
+    let context_hash = compute_context_hash(&all_guesses, &all_candidates);
+    let response_cache = compute_response_cache(&all_guesses, &all_candidates);
 
     match cli.command {
         Commands::Play { cache } => {
             play(
                 &cache,
                 context_hash,
-                candidates_arr,
-                guesses_arr,
-                response_cache
+                all_candidates,
+                all_guesses,
+                &response_cache
             )?;
         }
         Commands::Generate { cache } => {
             generate(
                 &cache,
                 context_hash,
-                candidates_arr,
-                guesses_arr,
-                response_cache
+                &all_candidates,
+                &all_guesses,
+                &response_cache
             )?;
         },
         Commands::Compare { cache, output } => {
              compare_heuristics(
-                &cache, &output, context_hash,
-                candidates_arr, guesses_arr, response_cache
+                 &cache, &output,
+                 context_hash,
+                 &all_candidates,
+                 &all_guesses,
+                 &response_cache
             )?;
         }
     }
@@ -125,9 +127,9 @@ fn main() -> Result<(), anyhow::Error> {
 fn generate(
     cache_path: &Path,
     context_hash: u64,
-    candidates: Vec<[u8; N_CHARS]>,
-    guesses: Vec<[u8; N_CHARS]>,
-    response_cache: Box<[u8]>,
+    candidates: &[[u8; N_CHARS]],
+    guesses: &[[u8; N_CHARS]],
+    response_cache: &ResponseCache,
 ) -> Result<(), anyhow::Error> {
     info!("Entering GENERATE mode.");
 
@@ -152,8 +154,8 @@ fn generate(
     }).expect("Error setting Ctrl-C handler");
 
     info!("Starting solver...");
-    let (best_idx, cost) = compute_optimal_move(
-        &response_cache, &candidates, &guesses, &memo
+    let (best_idx, cost) = compute_optimal_move(&candidates, &guesses,
+                                                &response_cache, &memo
     );
 
     let best_word = arr_to_word(&guesses[best_idx]);
@@ -171,7 +173,7 @@ fn play(
     context_hash: u64,
     candidates: Vec<[u8; N_CHARS]>,
     guesses: Vec<[u8; N_CHARS]>,
-    response_cache: Box<[u8]>,
+    response_cache: &ResponseCache,
 ) -> Result<(), anyhow::Error> {
     println!("--- Wordle Solver: PLAY Mode ---");
 
@@ -183,7 +185,8 @@ fn play(
         .context("Failed to load cache")?;
 
     let mut current_candidates = bitvec![u64, Lsb0; 1; candidates.len()];
-    let n_total = candidates.len();
+    let n_total_candidates = candidates.len();
+    let n_total_guesses = guesses.len();
 
     loop {
         let count = current_candidates.count_ones();
@@ -195,8 +198,8 @@ fn play(
         // Get Optimal Guess
         println!("Thinking...");
         let guess_idx = pick_optimal(
-            &current_candidates, &guesses,
-            n_total, &response_cache, &memo
+            &current_candidates, n_total_guesses,
+            &response_cache, &memo
         );
 
         let guess_idx = match guess_idx {
@@ -220,9 +223,10 @@ fn play(
         }
 
         // Filter Candidates
-        let mut next_candidates = bitvec![u64, Lsb0; 0; n_total];
+        let mut next_candidates = bitvec![u64, Lsb0; 0; n_total_candidates];
+        let cache_row = response_cache.get_row(guess_idx);
         for c_idx in current_candidates.iter_ones() {
-            let actual_resp = response_cache[guess_idx * n_total + c_idx] as usize;
+            let actual_resp = cache_row[c_idx] as usize;
             if actual_resp == resp_idx {
                 next_candidates.set(c_idx, true);
             }
@@ -315,44 +319,63 @@ fn compare_heuristics(
     cache_path: &Path,
     output_path: &Path,
     context_hash: u64,
-    candidates: Vec<[u8; N_CHARS]>,
-    guesses: Vec<[u8; N_CHARS]>,
-    response_cache: Box<[u8]>,
+    all_candidates: &[[u8; N_CHARS]],
+    all_guesses: &[[u8; N_CHARS]],
+    response_cache: &ResponseCache,
 ) -> Result<(), anyhow::Error> {
     info!("--- Wordle Solver: COMPARISON Mode ---");
 
     if !cache_path.exists() {
         bail!("Cache file not found. Run 'generate' first.");
     }
-    let memo = wordle_solver::cache::load_cache(cache_path, context_hash)
+    let _memo = wordle_solver::cache::load_cache(cache_path, context_hash)
         .context("Failed to load cache")?;
 
-    let c_idx_to_g_idx = wordle_solver::utils::compute_cidx_to_gidx_map(&candidates, &guesses);
-    let initial_candidates = bitvec![u64, Lsb0; 1; candidates.len()];
-    let _memo_ref = Some(memo);
+    let policies: Vec<(&str, Box<dyn Policy + '_>)> = vec![
+        (
+            "Max Frequency",
+            Box::new(MaxFreqPolicy {
+                all_candidates,
+                all_guesses,
+            })
+        ),
+        (
+            "Minimize Remaining",
+            Box::new(MinRemainingPolicy {
+                response_cache,
+                n_total_candidates: all_candidates.len(),
+                n_total_guesses: all_guesses.len(),
+            })
+        ),
+        /*
+        (
+            "Global Optimal",
+            Box::new(OptimalPolicy {
+                all_guesses,
+                response_cache,
+                memo,
+                n_total_candidates
+            })
+        ),
+        */
+    ];
 
-    let mut results = Vec::new();
 
-    info!("1/3: Simulating Max Frequency...");
-    let stats_max = simulate(
-        &initial_candidates, &guesses, &candidates, &response_cache,
-        &c_idx_to_g_idx, None, MAX_FREQUENCY_POLICY
-    );
-    results.push(("Max Frequency", stats_max));
+    // Run simulations for each strategy
+    let mut results: Vec<(&str, SimStats)> = Vec::new();
+    let initial_candidates = bitvec![u64, Lsb0; 1; all_candidates.len()];
 
-    info!("2/3: Simulating Min Remaining...");
-    let stats_min = simulate(
-        &initial_candidates, &guesses, &candidates, &response_cache,
-        &c_idx_to_g_idx, None, MIN_REMAINING_POLICY
-    );
-    results.push(("Min Remaining", stats_min));
+    println!("Starting strategy comparison...");
+    for (name, policy) in policies {
+        println!("Running simulation for: {}", name);
 
-    // info!("3/3: Simulating Optimal (this uses the cache)...");
-    // let stats_opt = simulate(
-    //     &initial_candidates, &guesses, &candidates, &response_cache,
-    //     &c_idx_to_g_idx, memo_ref, OPTIMAL_CACHE_POLICY
-    // );
-    // results.push(("Optimal", stats_opt));
+        // The `simulate` function calculates stats for the given policy
+        let stats = simulate(&response_cache, &initial_candidates, &*policy);
+
+        println!("  -> Mean: {:.4} | Total Guesses: {}", stats.mean(), stats.total_guesses());
+        results.push((name, stats));
+    }
+
 
     info!("Generating plot at {:?}", output_path);
     generate_comparison_image(results, output_path)

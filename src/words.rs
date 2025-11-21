@@ -60,8 +60,8 @@ pub fn words_to_arr(words: &HashSet<String>) -> Vec<[u8; N_CHARS]> {
     for word in sorted_words {
         assert_eq!(word.len(), N_CHARS, "Unexpected word len: expected {}, found {}", N_CHARS, word.len());
         let bytes = word.as_bytes();
-        let mut fixed_arr = [0u8; N_CHARS];
-        fixed_arr.copy_from_slice(&bytes[0..N_CHARS]);
+        let fixed_arr: [u8; N_CHARS] = bytes[0..N_CHARS].try_into()
+            .expect("Length mismatch");
         data.push(fixed_arr);
     }
     data

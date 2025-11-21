@@ -6,9 +6,8 @@ use bitvec::order::Lsb0;
 use bitvec::vec::BitVec;
 use log::info;
 use crate::cache::MemoCache;
-use crate::utils::{compute_cidx_to_gidx_map};
-use crate::resp::{get_partition_counts, generate_partitions};
-use crate::sim::{simulate, MIN_REMAINING_POLICY};
+use crate::resp::{get_partition_counts, generate_partitions, ResponseCache};
+use crate::sim::{simulate, MinRemainingPolicy};
 use crate::words::N_CHARS;
 
 /// Computes a lower bound on the optimal expected guesses for a given partition size.
@@ -23,10 +22,9 @@ pub fn lower_bound(n_candidates: usize) -> usize {
 #[inline]
 pub fn filter_and_sort_guesses(
     guesses: &[usize],
-    response_cache: &[u8],
+    response_cache: &ResponseCache,
     candidates: &BitVec<u64, Lsb0>,
     n_candidates: usize,
-    n_candidates_total: usize,
     beta: usize,
 ) -> Vec<usize> {
 
@@ -34,10 +32,7 @@ pub fn filter_and_sort_guesses(
     for &g_idx in guesses {
 
         // Get partition counts
-        let counts = get_partition_counts(
-            candidates, response_cache,
-            g_idx, n_candidates_total,
-        );
+        let counts = get_partition_counts(g_idx, candidates, response_cache);
 
         // Compute guess score, lb, and information gain
         let mut guess_lb = n_candidates;
@@ -74,9 +69,8 @@ pub fn filter_and_sort_guesses(
 
 
 struct SolverContext<'a> {
-    response_cache: &'a [u8],
+    response_cache: &'a ResponseCache,
     memo: &'a MemoCache,
-    n_total_candidates: usize,
 }
 
 impl<'a> SolverContext<'a> {
@@ -108,8 +102,7 @@ impl<'a> SolverContext<'a> {
         // Filter out guesses that don't provide information, or beat beta, sorted by score.
         let next_guesses = filter_and_sort_guesses(
             guesses, self.response_cache,
-            candidates, n_candidates,
-            self.n_total_candidates, beta
+            candidates, n_candidates, beta
         );
 
         // Iterate over all reasonable moves and recurse.
@@ -117,10 +110,7 @@ impl<'a> SolverContext<'a> {
         for &g_idx in &next_guesses {
 
             // Generate actual BitVec partitions
-            let partitions = generate_partitions(
-                candidates, self.response_cache,
-                g_idx, self.n_total_candidates,
-            );
+            let partitions = generate_partitions(g_idx, candidates, self.response_cache);
 
             // Calculate exact cost for this guess
             let guess_cost = self.evaluate_guess(&partitions, &next_guesses, beta, n_candidates);
@@ -233,9 +223,9 @@ impl BestGuess {
 ///
 /// This function serves as the parallel entry point for the Branch and Bound algorithm.
 pub fn compute_optimal_move(
-    response_cache: &[u8],
     all_candidates: &[[u8; N_CHARS]],
     all_guesses: &[[u8; N_CHARS]],
+    response_cache: &ResponseCache,
     memo: &MemoCache,
 ) -> (usize, usize) {
 
@@ -244,21 +234,17 @@ pub fn compute_optimal_move(
     let n_total_guesses = all_guesses.len();
     info!("Starting solver for {} candidates...", n_total_candidates);
     let initial_candidates = bitvec![u64, Lsb0; 1; n_total_candidates];
-    let c_idx_to_g_idx = compute_cidx_to_gidx_map(all_candidates, all_guesses);
 
     // Compute initial heuristic cost using the "Min Remaining" heuristic.
-    let heuristic_cost = simulate(
-        &initial_candidates, all_guesses, all_candidates,
-        response_cache, &c_idx_to_g_idx, None, MIN_REMAINING_POLICY,
-    ).total_guesses();
+    let policy = MinRemainingPolicy { response_cache, n_total_candidates, n_total_guesses };
+    let heuristic_cost = simulate(response_cache, &initial_candidates, &policy).total_guesses();
     info!("Initial Heuristic Upper Bound (Beta): {}", heuristic_cost);
 
     // Sort guesses by heuristic to prioritize promising branches.
     let all_guesses: Vec<usize> = (0..n_total_guesses).into_iter().collect();
     let promising_guesses = filter_and_sort_guesses(
-        all_guesses.as_slice(), response_cache,
-        &initial_candidates, n_total_candidates, n_total_candidates,
-        heuristic_cost + 1
+        &all_guesses, response_cache,
+        &initial_candidates, n_total_candidates, heuristic_cost
     );
     let total_tasks = promising_guesses.len();
     info!("Sorted {} promising guesses.", total_tasks);
@@ -280,11 +266,8 @@ pub fn compute_optimal_move(
                     let g_idx = promising_guesses[idx];
 
                     // Process item
-                    let partitions = generate_partitions(
-                        &initial_candidates, response_cache,
-                        g_idx, n_total_candidates
-                    );
-                    let mut solver = SolverContext { response_cache, memo, n_total_candidates };
+                    let partitions = generate_partitions(g_idx, &initial_candidates, response_cache);
+                    let mut solver = SolverContext { response_cache, memo };
                     let current_beta = best_guess.get_beta();
                     let cost = solver.evaluate_guess(
                         &partitions, &promising_guesses,

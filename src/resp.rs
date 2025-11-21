@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use bitvec::bitvec;
 use bitvec::order::Lsb0;
 use bitvec::prelude::BitVec;
@@ -90,11 +91,41 @@ pub fn get_resp(guess: &[u8; N_CHARS], candidate: &[u8; N_CHARS]) -> [u8; N_CHAR
     response
 }
 
+pub struct ResponseCache {
+    data: Vec<u8>,
+    stride: usize, // n_total_candidates
+
+}
+
+impl ResponseCache {
+    pub fn new(data: Vec<u8>, stride: usize) -> Self {
+        assert_eq!(data.len() % stride, 0, "Data length must be multiple of stride");
+        Self { data, stride }
+    }
+
+    #[inline(always)]
+    pub fn get(&self, g_idx: usize, c_idx: usize) -> u8 {
+        unsafe { *self.data.get_unchecked(g_idx * self.stride + c_idx) }
+    }
+
+    #[inline]
+    pub fn get_row(&self, g_idx: usize) -> &[u8] {
+        let start = g_idx * self.stride;
+        let end = start + self.stride;
+        unsafe { self.data.get_unchecked(start..end) }
+    }
+
+    #[inline]
+    pub fn stride(&self) -> usize {
+        self.stride
+    }
+}
+
 /// Precomputes responses for all (guess, candidate) pairs.
 pub fn compute_response_cache(
     guesses: &[[u8; N_CHARS]],
     candidates: &[[u8; N_CHARS]],
-) -> Box<[u8]> {
+) -> ResponseCache {
 
     info!("Building response cache...");
     let n_guesses = guesses.len();
@@ -120,19 +151,19 @@ pub fn compute_response_cache(
     info!("Response cache built successfully. (~{})", format_bytes(total_bytes as f32));
 
     // Return the fully computed cache.
-    cache_data.into_boxed_slice()
+    ResponseCache::new(cache_data, n_candidates)
 }
 
 #[inline]
 pub fn get_partition_counts(
-    candidates: &BitVec<u64, Lsb0>,
-    response_cache: &[u8],
     g_idx: usize,
-    n_total_candidates: usize,
+    candidates: &BitVec<u64, Lsb0>,
+    response_cache: &ResponseCache,
 ) -> [usize; N_RESPONSES] {
     let mut counts = [0usize; N_RESPONSES];
+    let cache_row = response_cache.get_row(g_idx);
     for c_idx in candidates.iter_ones() {
-        let resp_idx = response_cache[g_idx * n_total_candidates + c_idx] as usize;
+        let resp_idx = cache_row[c_idx] as usize;
         // SAFETY: get_unchecked is safe here per definition of response_to_index
         unsafe { *counts.get_unchecked_mut(resp_idx) += 1; }
     }
@@ -142,23 +173,24 @@ pub fn get_partition_counts(
 /// Returns all non-zero sized partitions and their counts, excluding the Green response.
 #[inline]
 pub fn generate_partitions(
-    candidates: &BitVec<u64, Lsb0>,
-    response_cache: &[u8],
     g_idx: usize,
-    n_total_candidates: usize,
+    candidates: &BitVec<u64, Lsb0>,
+    response_cache: &ResponseCache,
 ) -> Vec<(BitVec<u64, Lsb0>, usize)> {
 
     // Create arrays for partitions and for counts.
     let mut partitions: [Option<BitVec<u64, Lsb0>>; N_RESPONSES] =
         std::array::from_fn(|_| None);
     let mut counts = [0usize; N_RESPONSES];
+    let n_candidates = candidates.len();
+    let cache_row = response_cache.get_row(g_idx);
 
     // Iterate over all candidates to fill partitions.
     for c_idx in candidates.iter_ones() {
-        let resp_idx = response_cache[g_idx * n_total_candidates + c_idx] as usize;
+        let resp_idx = cache_row[c_idx] as usize;
         if resp_idx == CORRECT_IDX { continue; } // Don't create partition for Green response.
         partitions[resp_idx]
-            .get_or_insert_with(|| bitvec![u64, Lsb0; 0; candidates.len()])
+            .get_or_insert_with(|| bitvec![u64, Lsb0; 0; n_candidates])
             .set(c_idx, true);
         counts[resp_idx] += 1;
     }
@@ -169,6 +201,30 @@ pub fn generate_partitions(
         .zip(counts)
         .filter_map(|(p_opt, count)| p_opt.map(|p| (p, count)))
         .collect()
+}
+
+/// Returns all non-zero sized partitions, their counts,
+/// and their response indices, including the Green response.
+pub fn generate_all_partitions(
+    g_idx: usize,
+    candidates: &BitVec<u64, Lsb0>,
+    response_cache: &ResponseCache,
+) -> HashMap<usize, (BitVec<u64, Lsb0>, usize)> {
+    // Setup.
+    let mut partitions: HashMap<usize, (BitVec<u64, Lsb0>, usize)> = HashMap::new();
+    let n_candidates = candidates.len();
+    let cache_row = response_cache.get_row(g_idx);
+
+    // Iterate over all candidates to fill partitions.
+    for c_idx in candidates.iter_ones() {
+        let resp_idx = cache_row[c_idx] as usize;
+        let (p_candidates, p_count) = partitions
+            .entry(resp_idx)
+            .or_insert_with(|| (bitvec![u64, Lsb0; 0; n_candidates], 0));
+        p_candidates.set(c_idx, true);
+        *p_count += 1;
+    }
+    partitions
 }
 
 #[cfg(test)]

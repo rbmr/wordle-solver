@@ -3,7 +3,7 @@ use bitvec::vec::BitVec;
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use rayon::prelude::IntoParallelIterator;
 use crate::cache::MemoCache;
-use crate::resp::{generate_partitions, get_partition_counts};
+use crate::resp::{generate_partitions, get_partition_counts, ResponseCache};
 use crate::utils::sum_of_squares;
 use crate::words::{letter_to_index, N_CHARS, N_LETTERS};
 
@@ -30,6 +30,7 @@ pub fn compute_letter_frequencies(
         })
 }
 
+#[inline]
 pub fn get_max_freq_score(
     guess_word: &[u8; N_CHARS],
     letter_frequencies: &[usize; N_LETTERS],
@@ -68,27 +69,24 @@ pub fn pick_max_freq(
         .expect("No guesses available.")
 }
 
+#[inline]
 pub fn get_min_remaining_score(
     candidates: &BitVec<u64, Lsb0>,
-    response_cache: &[u8],
+    response_cache: &ResponseCache,
     g_idx: usize,
-    n_total_candidates: usize,
 ) -> usize {
-    sum_of_squares(get_partition_counts(
-        candidates, response_cache, g_idx, n_total_candidates
-    ))
+    sum_of_squares(get_partition_counts(g_idx, candidates, response_cache))
 }
 
 pub fn pick_min_remaining(
     candidates: &BitVec<u64, Lsb0>,
     guess_indices: &[usize],
-    response_cache: &[u8],
-    n_candidates_total: usize,
+    response_cache: &ResponseCache,
 ) -> usize {
     guess_indices
         .par_iter()
         .map(|&g_idx| {
-            let score = get_min_remaining_score(candidates, response_cache, g_idx, n_candidates_total);
+            let score = get_min_remaining_score(candidates, response_cache, g_idx);
             (score, g_idx)
         })
         .min()
@@ -107,9 +105,8 @@ pub enum OptimalGuessError {
 /// Retrieves the optimal guess for the candidates from the cache, if present.
 pub fn pick_optimal(
     candidates: &BitVec<u64, Lsb0>,
-    all_guesses: &[[u8; N_CHARS]],
-    n_candidates_total: usize,
-    response_cache: &[u8],
+    n_total_guesses: usize,
+    response_cache: &ResponseCache,
     memo: &MemoCache,
 ) -> Result<usize, OptimalGuessError> {
 
@@ -121,13 +118,10 @@ pub fn pick_optimal(
 
     // Find the first guess that satisfies the optimal cost.
     let n_candidates = candidates.count_ones();
-    let found_guess = (0..all_guesses.len())
+    let found_guess = (0..n_total_guesses)
         .into_par_iter()
         .find_map_first(|g_idx| {
-            let partitions = generate_partitions(
-                candidates, response_cache,
-                g_idx, n_candidates_total
-            );
+            let partitions = generate_partitions(g_idx, candidates, response_cache);
 
             let mut current_guess_cost = n_candidates;
 

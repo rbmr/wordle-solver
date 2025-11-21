@@ -1,7 +1,7 @@
 pub mod words;
 pub mod utils;
 pub mod solver;
-pub mod policy;
+pub mod strat;
 pub mod sim;
 pub mod resp;
 pub mod cache;
