@@ -258,9 +258,9 @@ pub fn compute_optimal_move(
     info!("Starting parallel guess evaluation...");
     let pb = ProgressBar::new(total_tasks as u64);
     pb.set_style(ProgressStyle::default_bar()
-        .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta}) {msg}")
+        .template("[{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} {percent}% ({eta}) {msg}")
         .unwrap()
-        .progress_chars("#> "));
+        .progress_chars("█▉▊▋▌▍▎▏ "));
     pb.set_message(format!("Best: {}", heuristic_cost));
 
     // Setup cross-thread shared variables.
