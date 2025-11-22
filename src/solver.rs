@@ -25,8 +25,6 @@ pub fn filter_and_sort_guesses(
     guesses: &[usize],
     response_cache: &ResponseCache,
     candidates: &BitVec<u64, Lsb0>,
-    n_candidates: usize,
-    beta: usize,
 ) -> Vec<usize> {
 
     let mut scored_guesses: Vec<(usize, usize)> = Vec::with_capacity(guesses.len());
@@ -36,12 +34,10 @@ pub fn filter_and_sort_guesses(
         let counts = get_partition_counts(g_idx, candidates, response_cache);
 
         // Compute guess score, lb, and information gain
-        let mut guess_lb = n_candidates;
         let mut sum_squares = 0;
         let mut non_zero_buckets = 0;
         for c in counts {
             if c > 0 {
-                guess_lb += lower_bound(c);
                 sum_squares += c * c;
                 non_zero_buckets += 1;
             }
@@ -49,11 +45,6 @@ pub fn filter_and_sort_guesses(
 
         // Skip guesses with no information gain
         if non_zero_buckets <= 1 {
-            continue;
-        }
-
-        // Skip guesses that will not beat beta
-        if guess_lb >= beta {
             continue;
         }
 
@@ -79,7 +70,7 @@ impl<'a> SolverContext<'a> {
     /// Computes the minimum total cost for the candidate set if it is <= beta,
     /// otherwise returns usize::MAX.
     fn evaluate_candidates(
-        &mut self,
+        &self,
         candidates: &BitVec<u64, Lsb0>,
         guesses: &[usize],
         mut beta: usize
@@ -102,28 +93,19 @@ impl<'a> SolverContext<'a> {
 
         // Filter out guesses that don't provide information, or beat beta, sorted by score.
         let next_guesses = filter_and_sort_guesses(
-            guesses, self.response_cache,
-            candidates, n_candidates, beta
+            guesses, self.response_cache, candidates
         );
 
         // Iterate over all reasonable moves and recurse.
         let mut lowest_guess_cost = usize::MAX;
-        for &g_idx in &next_guesses {
-
-            // Generate actual BitVec partitions
-            let partitions = generate_partitions(g_idx, candidates, self.response_cache);
+        for g_idx in &next_guesses {
 
             // Calculate exact cost for this guess
-            let guess_cost = self.evaluate_guess(&partitions, &next_guesses, beta, n_candidates);
+            let guess_cost = self.evaluate_guess(*g_idx, candidates, &next_guesses, beta, n_candidates);
             if guess_cost < beta {
                 beta = guess_cost;
                 lowest_guess_cost = guess_cost;
             }
-        }
-
-        if lowest_guess_cost != usize::MAX {
-            // We computed the true minimal cost of at least one guess.
-            self.memo.insert(candidates.clone(), beta);
         }
 
         lowest_guess_cost
@@ -132,12 +114,16 @@ impl<'a> SolverContext<'a> {
     /// Computes the minimum total cost for the given guess if it is <= beta,
     /// otherwise returns usize::MAX.
     fn evaluate_guess(
-        &mut self,
-        partitions: &Vec<(BitVec<u64, Lsb0>, usize)>,
+        &self,
+        g_idx: usize,
+        candidates: &BitVec<u64, Lsb0>,
         next_guesses: &[usize],
         beta: usize,
         n_candidates: usize,
     ) -> usize {
+
+        // Generate all partitions for the current candidates
+        let partitions = generate_partitions(g_idx, &candidates, self.response_cache);
 
         // Calculate initial lower bound for the guess
         let mut guess_lb = n_candidates;
@@ -146,15 +132,15 @@ impl<'a> SolverContext<'a> {
         for (partition_candidates, partition_size) in partitions {
 
             // Update lower bound using this partition's size
-            if *partition_size == 1 {
+            if partition_size == 1 {
                 guess_lb += 1;
-            } else if *partition_size == 2 {
+            } else if partition_size == 2 {
                 guess_lb += 3;
-            } else if let Some(cached_val) = self.memo.get(partition_candidates) {
+            } else if let Some(cached_val) = self.memo.get(&partition_candidates) {
                 guess_lb += *cached_val;
             } else {
                 unresolved_partitions.push((partition_candidates, partition_size));
-                guess_lb += lower_bound(*partition_size)
+                guess_lb += lower_bound(partition_size)
             }
 
             if guess_lb > beta { return usize::MAX; }
@@ -165,7 +151,7 @@ impl<'a> SolverContext<'a> {
 
         // Recurse, tightening lower bound.
         for (partition_candidates, partition_size) in unresolved_partitions {
-            let p_lb = lower_bound(*partition_size);
+            let p_lb = lower_bound(partition_size);
             let p_cost = self.evaluate_candidates(
                 &partition_candidates,
                 &next_guesses,
@@ -174,6 +160,7 @@ impl<'a> SolverContext<'a> {
             if p_cost == usize::MAX {
                 return usize::MAX;
             }
+            self.memo.insert(partition_candidates.clone(), beta);
             // p_cost != usize::MAX
             // guarantees guess_lb + (p_cost - p_lb) <= beta, because of max cost for child
             guess_lb += p_cost - p_lb;
@@ -246,10 +233,10 @@ pub fn compute_optimal_move(
     info!("Initial Heuristic Upper Bound (Beta): {}", heuristic_cost);
 
     // Sort guesses by heuristic to prioritize promising branches.
+    let mut solver = SolverContext { response_cache, memo };
     let all_guesses: Vec<usize> = (0..n_total_guesses).into_iter().collect();
     let promising_guesses = filter_and_sort_guesses(
-        &all_guesses, response_cache,
-        &initial_candidates, n_total_candidates, heuristic_cost
+        &all_guesses, response_cache, &initial_candidates
     );
     let total_tasks = promising_guesses.len();
     info!("Sorted {} promising guesses.", total_tasks);
@@ -281,11 +268,9 @@ pub fn compute_optimal_move(
                     let g_idx = promising_guesses[idx];
 
                     // Process item
-                    let partitions = generate_partitions(g_idx, &initial_candidates, response_cache);
-                    let mut solver = SolverContext { response_cache, memo };
                     let current_beta = best_guess.get_beta();
                     let cost = solver.evaluate_guess(
-                        &partitions, &promising_guesses,
+                        g_idx,  &initial_candidates, &promising_guesses,
                         current_beta, n_total_candidates
                     );
 
