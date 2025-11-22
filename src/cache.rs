@@ -6,11 +6,11 @@ use std::path::Path;
 use std::time::Instant;
 
 use dashmap::DashMap;
-use bitvec::prelude::*;
 use log::{info, warn, error};
 use serde::{Serialize, Deserialize};
+use crate::bits::BitSet;
 
-pub type MemoCache = DashMap<BitVec<u64, Lsb0>, usize>;
+pub type MemoCache = DashMap<BitSet, usize>;
 #[derive(Deserialize)]
 struct PersistedCache {
     context_hash: u64,

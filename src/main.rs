@@ -3,17 +3,15 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use anyhow::{bail, Context};
-use bitvec::bitvec;
-use bitvec::order::Lsb0;
-use bitvec::vec::BitVec;
 use log::{info, warn};
 use clap::{Parser, Subcommand};
+use wordle_solver::bits::BitSet;
 use wordle_solver::cache::{compute_context_hash, just_save_cache, new_cache};
 use wordle_solver::graph::generate_comparison_image;
-use wordle_solver::strat::pick_optimal;
-use wordle_solver::resp::{compute_response_cache, get_resp, response_to_index, ResponseCache, B, CORRECT_IDX, G, Y};
+use wordle_solver::resp::{build_partition_map, compute_response_cache, get_resp, response_to_index, PartitionMap, B, CORRECT_IDX, G, Y};
 use wordle_solver::sim::{simulate, MaxFreqPolicy, MinRemainingPolicy, Policy, SimStats};
 use wordle_solver::solver::compute_optimal_move;
+use wordle_solver::strat::pick_optimal;
 use wordle_solver::words::{arr_to_word, load_words, words_to_arr, CANDIDATES, GUESSES, N_CHARS};
 
 #[derive(Parser)]
@@ -90,6 +88,7 @@ fn main() -> Result<(), anyhow::Error> {
     let all_guesses = words_to_arr(&guesses_set);
     let context_hash = compute_context_hash(&all_guesses, &all_candidates);
     let response_cache = compute_response_cache(&all_guesses, &all_candidates);
+    let partition_map = build_partition_map(&response_cache);
 
     match cli.command {
         Commands::Play { cache } => {
@@ -98,7 +97,7 @@ fn main() -> Result<(), anyhow::Error> {
                 context_hash,
                 all_candidates,
                 all_guesses,
-                &response_cache
+                &partition_map
             )?;
         }
         Commands::Generate { cache } => {
@@ -107,7 +106,7 @@ fn main() -> Result<(), anyhow::Error> {
                 context_hash,
                 &all_candidates,
                 &all_guesses,
-                &response_cache
+                &partition_map
             )?;
         },
         Commands::Compare { cache, output } => {
@@ -116,7 +115,7 @@ fn main() -> Result<(), anyhow::Error> {
                  context_hash,
                  &all_candidates,
                  &all_guesses,
-                 &response_cache
+                 &partition_map
             )?;
         }
     }
@@ -129,7 +128,7 @@ fn generate(
     context_hash: u64,
     candidates: &[[u8; N_CHARS]],
     guesses: &[[u8; N_CHARS]],
-    response_cache: &ResponseCache,
+    partition_map: &PartitionMap,
 ) -> Result<(), anyhow::Error> {
     info!("Entering GENERATE mode.");
 
@@ -155,7 +154,7 @@ fn generate(
 
     info!("Starting solver...");
     let (best_idx, cost) = compute_optimal_move(&candidates, &guesses,
-                                                &response_cache, &memo
+                                                &partition_map, &memo
     );
 
     let best_word = arr_to_word(&guesses[best_idx]);
@@ -173,7 +172,7 @@ fn play(
     context_hash: u64,
     candidates: Vec<[u8; N_CHARS]>,
     guesses: Vec<[u8; N_CHARS]>,
-    response_cache: &ResponseCache,
+    partition_map: &PartitionMap,
 ) -> Result<(), anyhow::Error> {
     println!("--- Wordle Solver: PLAY Mode ---");
 
@@ -184,8 +183,7 @@ fn play(
     let memo = wordle_solver::cache::load_cache(cache_path, context_hash)
         .context("Failed to load cache")?;
 
-    let mut current_candidates = bitvec![u64, Lsb0; 1; candidates.len()];
-    let n_total_candidates = candidates.len();
+    let mut current_candidates = BitSet::ones(candidates.len());
     let n_total_guesses = guesses.len();
 
     loop {
@@ -199,7 +197,7 @@ fn play(
         println!("Thinking...");
         let guess_idx = pick_optimal(
             &current_candidates, n_total_guesses,
-            &response_cache, &memo
+            &partition_map, &memo
         );
 
         let guess_idx = match guess_idx {
@@ -223,21 +221,29 @@ fn play(
         }
 
         // Filter Candidates
-        let mut next_candidates = bitvec![u64, Lsb0; 0; n_total_candidates];
-        let cache_row = response_cache.get_row(guess_idx);
-        for c_idx in current_candidates.iter_ones() {
-            let actual_resp = cache_row[c_idx] as usize;
-            if actual_resp == resp_idx {
-                next_candidates.set(c_idx, true);
-            }
+        let next_candidates = next_candidates(
+            guess_idx, resp_idx, &current_candidates, &partition_map
+        );
+        if next_candidates.is_none() {
+            println!("No remaining candidates. Game Over!");
+            return Ok(());
         }
-        current_candidates = next_candidates;
+        current_candidates = next_candidates.unwrap();
     }
+}
+
+pub fn next_candidates(g_idx: usize, resp_idx: usize, candidates: &BitSet, partition_map: &PartitionMap) -> Option<BitSet> {
+    let partitions = unsafe { partition_map.get_unchecked(g_idx) };
+    for (p_resp_idx, p_cand) in partitions {
+        if resp_idx == *p_resp_idx {
+            return Some(p_cand.intersect(candidates));
+        }
+    } None
 }
 
 const DEFAULT_MAX_PRINT: usize = 512;
 
-fn print_candidates(candidates: &BitVec<u64, Lsb0>, all_candidates: &[[u8; 5]], max_print: Option<usize>) {
+fn print_candidates(candidates: &BitSet, all_candidates: &[[u8; 5]], max_print: Option<usize>) {
     let count = candidates.count_ones();
     println!("\nRemaining Candidates: {}", count);
 
@@ -257,7 +263,7 @@ fn print_candidates(candidates: &BitVec<u64, Lsb0>, all_candidates: &[[u8; 5]], 
 
 fn get_response(
     guess: &[u8; 5],
-    candidates: &BitVec<u64, Lsb0>,
+    candidates: &BitSet,
     all_candidates: &[[u8; 5]]
 ) -> io::Result<usize> {
     loop {
@@ -321,7 +327,7 @@ fn compare_heuristics(
     context_hash: u64,
     all_candidates: &[[u8; N_CHARS]],
     all_guesses: &[[u8; N_CHARS]],
-    response_cache: &ResponseCache,
+    partition_map: &PartitionMap,
 ) -> Result<(), anyhow::Error> {
     info!("--- Wordle Solver: COMPARISON Mode ---");
 
@@ -342,7 +348,7 @@ fn compare_heuristics(
         (
             "Minimize Remaining",
             Box::new(MinRemainingPolicy {
-                response_cache,
+                partition_map,
                 n_total_candidates: all_candidates.len(),
                 n_total_guesses: all_guesses.len(),
             })
@@ -363,14 +369,14 @@ fn compare_heuristics(
 
     // Run simulations for each strategy
     let mut results: Vec<(&str, SimStats)> = Vec::new();
-    let initial_candidates = bitvec![u64, Lsb0; 1; all_candidates.len()];
+    let initial_candidates = BitSet::ones(all_candidates.len());
 
     println!("Starting strategy comparison...");
     for (name, policy) in policies {
         println!("Running simulation for: {}", name);
 
         // The `simulate` function calculates stats for the given policy
-        let stats = simulate(&response_cache, &initial_candidates, &*policy);
+        let stats = simulate(&partition_map, &initial_candidates, &*policy);
 
         println!("  -> Mean: {:.4} | Total Guesses: {}", stats.mean(), stats.total_guesses());
         results.push((name, stats));

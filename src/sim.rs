@@ -1,8 +1,7 @@
 use std::collections::BTreeMap;
-use bitvec::prelude::*;
-use crate::cache::MemoCache;
-use crate::resp::{generate_all_partitions, ResponseCache, CORRECT_IDX};
-use crate::strat::{pick_max_freq, pick_min_remaining, pick_optimal};
+use crate::bits::BitSet;
+use crate::resp::{get_partitions, PartitionMap, CORRECT_IDX};
+use crate::strat::{pick_max_freq, pick_min_remaining};
 use crate::words::N_CHARS;
 
 pub struct SimStats {
@@ -49,11 +48,18 @@ impl SimStats {
     }
 }
 
+/// Context to hold shared data for the recursive heuristic simulation.
+struct Simulation<'a> {
+    partition_map: &'a PartitionMap,
+    stats: SimStats,
+    policy: &'a dyn Policy,
+}
+
 impl<'a> Simulation<'a> {
 
     pub fn run(
         &mut self,
-        candidates: &BitVec<u64, Lsb0>,
+        candidates: &BitSet,
         current_depth: usize,
     ) {
         let n_candidates = candidates.count_ones();
@@ -74,29 +80,22 @@ impl<'a> Simulation<'a> {
         let guess_idx = self.policy.pick(candidates);
 
         // Partition the candidates based on the chosen guess g
-        let partitions = generate_all_partitions(guess_idx, candidates, self.response_cache);
+        let partitions = get_partitions(guess_idx, candidates, self.partition_map);
         assert!(partitions.len() > 1, "Partitioning failed, policy is broken.");
 
         // Recurse.
-        for (resp_idx, (partition_candidates, _)) in partitions {
+        for (resp_idx, p_cand, _) in partitions {
             if resp_idx == CORRECT_IDX {
                 self.stats.inc(current_depth);
                 continue;
             }
-            self.run(&partition_candidates, current_depth + 1);
+            self.run(&p_cand, current_depth + 1);
         }
     }
 }
 
-/// Context to hold shared data for the recursive heuristic simulation.
-struct Simulation<'a> {
-    response_cache: &'a ResponseCache,
-    stats: SimStats,
-    policy: &'a dyn Policy,
-}
-
 pub trait Policy: Sync + Send {
-    fn pick(&self, candidates: &BitVec<u64, Lsb0>) -> usize;
+    fn pick(&self, candidates: &BitSet) -> usize;
 }
 
 pub struct MaxFreqPolicy<'a>{
@@ -105,14 +104,14 @@ pub struct MaxFreqPolicy<'a>{
 }
 
 impl<'a> Policy for MaxFreqPolicy<'a> {
-    fn pick(&self, candidates: &BitVec<u64, Lsb0>) -> usize {
+    fn pick(&self, candidates: &BitSet) -> usize {
         let candidate_indices: Vec<usize> = candidates.iter_ones().collect();
         let all_guesses_indices: Vec<usize> = (0..self.all_guesses.len()).collect();
         pick_max_freq(&candidate_indices, &all_guesses_indices, self.all_candidates, self.all_guesses)
     }
 }
 pub struct MinRemainingPolicy<'a> {
-    pub response_cache: &'a ResponseCache,
+    pub partition_map: &'a PartitionMap,
     pub n_total_candidates: usize,
     pub n_total_guesses: usize,
 }
@@ -120,37 +119,18 @@ pub struct MinRemainingPolicy<'a> {
 impl<'a> Policy for MinRemainingPolicy<'a> {
 
     #[inline]
-    fn pick(&self, candidates: &BitVec<u64, Lsb0>) -> usize {
+    fn pick(&self, candidates: &BitSet) -> usize {
         let all_guess_indices: Vec<usize> = (0..self.n_total_guesses).collect();
-        pick_min_remaining(candidates, &all_guess_indices, self.response_cache)
-    }
-}
-
-pub struct OptimalPolicy<'a> {
-    pub all_guesses: &'a [[u8; N_CHARS]],
-    pub response_cache: &'a ResponseCache,
-    pub memo: &'a MemoCache,
-    pub n_total_candidates: usize,
-}
-
-impl<'a> Policy for OptimalPolicy<'a> {
-    #[inline]
-    fn pick(&self, candidates: &BitVec<u64, Lsb0>) -> usize {
-        pick_optimal(
-            candidates, self.all_guesses.len(),
-            self.response_cache, self.memo
-        ).unwrap()
+        pick_min_remaining(candidates, &all_guess_indices, self.partition_map)
     }
 }
 
 pub fn simulate<'a>(
-    response_cache: &ResponseCache,
-    initial_candidates: &BitVec<u64, Lsb0>,
+    partition_map: &PartitionMap,
+    initial_candidates: &BitSet,
     policy: &'a dyn Policy,
 ) -> SimStats {
-    let mut sim = Simulation {
-        response_cache, stats: SimStats::new(), policy,
-    };
+    let mut sim = Simulation { partition_map, stats: SimStats::new(), policy };
     sim.run(initial_candidates, 1);
     sim.stats
 }

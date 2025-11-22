@@ -1,12 +1,8 @@
-use std::collections::HashMap;
-use bitvec::bitvec;
-use bitvec::order::Lsb0;
-use bitvec::prelude::BitVec;
-use rayon::iter::ParallelIterator;
+use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use rayon::iter::IndexedParallelIterator;
 use log::info;
 use rayon::slice::ParallelSliceMut;
-use crate::utils::{format_bytes};
+use crate::bits::BitSet;
 use crate::words::{is_letter_char, letter_to_index, N_CHARS, N_LETTERS};
 
 pub const B: u8 = b'B';
@@ -148,83 +144,141 @@ pub fn compute_response_cache(
     // Log the final cache size
     let element_size = size_of::<u8>();
     let total_bytes = element_count * element_size;
-    info!("Response cache built successfully. (~{})", format_bytes(total_bytes as f32));
+    info!("Response cache built successfully. (~{})", format_bytes(total_bytes));
 
     // Return the fully computed cache.
     ResponseCache::new(cache_data, n_candidates)
 }
 
+pub type PartitionMap = Vec<Vec<(usize, BitSet)>>;
+
+/// Builds the partition map (Inverted Index)
+pub fn build_partition_map(cache: &ResponseCache) -> PartitionMap {
+    info!("Building partition map (reverse index)...");
+    let n_candidates = cache.stride();
+    let n_guesses = cache.data.len() / n_candidates;
+    let map: Vec<Vec<(usize, BitSet)>> = (0..n_guesses).into_par_iter().map(|g_idx| {
+            // Create sparse array of partitions
+            let mut partitions: [Option<BitSet>; N_RESPONSES] = std::array::from_fn(|_| None);
+
+            // Populate partitions
+            let row = cache.get_row(g_idx);
+            for (c_idx, &resp_byte) in row.iter().enumerate() {
+                let resp_idx = resp_byte as usize;
+                partitions[resp_idx]
+                    .get_or_insert_with(|| BitSet::new(n_candidates))
+                    .set(c_idx, true);
+            }
+
+            // Collapse into compact vector
+            partitions
+                .into_iter()
+                .enumerate()
+                .filter_map(|(r_idx, opt_bs)| {
+                    opt_bs.map(|bs| (r_idx, bs))
+                })
+                .collect()
+        })
+        .collect();
+
+    // Log size
+    let bytes = estimate_partition_map_size(&map);
+    info!("Partition map built. (~{})", format_bytes(bytes));
+
+    map
+}
+
+pub fn estimate_partition_map_size(map: &PartitionMap) -> usize {
+    let mut total_bytes = 0;
+    total_bytes += size_of_val(map); // Size of the Vec struct itself (ptr, cap, len)
+    for row in map {
+        // Add the inline overhead of the inner Vec (each row)
+        total_bytes += size_of_val(row);
+        for (_, bs) in row {
+            // Add the inline size of the (usize, BitSet) tuple element
+            total_bytes += size_of::<(usize, BitSet)>();
+            // Add the heap-allocated payload (u64 blocks) for the BitSet
+            total_bytes += bs.as_slice().len() * size_of::<u64>();
+        }
+    }
+    total_bytes
+}
+
+const KB: usize = 1024;
+const MB: usize = 1024;
+const GB: usize = 1024;
+
+/// Formats a byte count into a human-readable string (KB, MB, GB).
+pub fn format_bytes(bytes: usize) -> String {
+    if bytes >= GB {
+        format!("{:.2} GB", bytes as f64 / GB as f64)
+    } else if bytes >= MB {
+        format!("{:.2} MB", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{:.2} KB", bytes as f64 / KB as f64)
+    } else {
+        format!("{} bytes", bytes)
+    }
+}
+
+/// Fast intersection count using BitSets.
 #[inline]
 pub fn get_partition_counts(
     g_idx: usize,
-    candidates: &BitVec<u64, Lsb0>,
-    response_cache: &ResponseCache,
-) -> [usize; N_RESPONSES] {
-    let mut counts = [0usize; N_RESPONSES];
-    let cache_row = response_cache.get_row(g_idx);
-    for c_idx in candidates.iter_ones() {
-        let resp_idx = cache_row[c_idx] as usize;
-        // SAFETY: get_unchecked is safe here per definition of response_to_index
-        unsafe { *counts.get_unchecked_mut(resp_idx) += 1; }
+    candidates: &BitSet,
+    partition_map: &PartitionMap,
+) -> Vec<(usize, usize)> { // Returns (resp_idx, count)
+    let partitions = unsafe { partition_map.get_unchecked(g_idx) };
+    let mut counts = Vec::with_capacity(partitions.len());
+    for (resp_idx, mask) in partitions {
+        let count = mask.intersection_count(candidates);
+        if count > 0 {
+            counts.push((*resp_idx, count));
+        }
     }
     counts
 }
 
-/// Returns all non-zero sized partitions and their counts, excluding the Green response.
+/// Fast bitwise intersection using BitSets.
 #[inline]
-pub fn generate_partitions(
+pub fn get_partitions(
     g_idx: usize,
-    candidates: &BitVec<u64, Lsb0>,
-    response_cache: &ResponseCache,
-) -> Vec<(BitVec<u64, Lsb0>, usize)> {
-
-    // Create arrays for partitions and for counts.
-    let mut partitions: [Option<BitVec<u64, Lsb0>>; N_RESPONSES] =
-        std::array::from_fn(|_| None);
-    let mut counts = [0usize; N_RESPONSES];
-    let n_candidates = candidates.len();
-    let cache_row = response_cache.get_row(g_idx);
-
-    // Iterate over all candidates to fill partitions.
-    for c_idx in candidates.iter_ones() {
-        let resp_idx = cache_row[c_idx] as usize;
-        if resp_idx == CORRECT_IDX { continue; } // Don't create partition for Green response.
-        partitions[resp_idx]
-            .get_or_insert_with(|| bitvec![u64, Lsb0; 0; n_candidates])
-            .set(c_idx, true);
-        counts[resp_idx] += 1;
+    candidates: &BitSet,
+    partition_map: &PartitionMap,
+) -> Vec<(usize, BitSet, usize)> {
+    let partitions = unsafe { partition_map.get_unchecked(g_idx) };
+    let mut result = Vec::with_capacity(partitions.len());
+    for (resp_idx, mask) in partitions {
+        let p_count = mask.intersection_count(candidates);
+        if p_count > 0 {
+            let p_cand = mask.intersect(candidates);
+            result.push((*resp_idx, p_cand, p_count));
+        }
     }
-
-    // Collect all created BitVecs and their corresponding counts.
-    partitions
-        .into_iter()
-        .zip(counts)
-        .filter_map(|(p_opt, count)| p_opt.map(|p| (p, count)))
-        .collect()
+    result
 }
 
-/// Returns all non-zero sized partitions, their counts,
-/// and their response indices, including the Green response.
-pub fn generate_all_partitions(
+/// Fast bitwise intersection using BitSets, only creates BitSets for partitions with >2 elements.
+#[inline]
+pub fn get_lazy_partitions(
     g_idx: usize,
-    candidates: &BitVec<u64, Lsb0>,
-    response_cache: &ResponseCache,
-) -> HashMap<usize, (BitVec<u64, Lsb0>, usize)> {
-    // Setup.
-    let mut partitions: HashMap<usize, (BitVec<u64, Lsb0>, usize)> = HashMap::new();
-    let n_candidates = candidates.len();
-    let cache_row = response_cache.get_row(g_idx);
-
-    // Iterate over all candidates to fill partitions.
-    for c_idx in candidates.iter_ones() {
-        let resp_idx = cache_row[c_idx] as usize;
-        let (p_candidates, p_count) = partitions
-            .entry(resp_idx)
-            .or_insert_with(|| (bitvec![u64, Lsb0; 0; n_candidates], 0));
-        p_candidates.set(c_idx, true);
-        *p_count += 1;
+    candidates: &BitSet,
+    partition_map: &PartitionMap,
+) -> Vec<(usize, Option<BitSet>, usize)> {
+    let partitions = unsafe { partition_map.get_unchecked(g_idx) };
+    let mut result = Vec::with_capacity(partitions.len());
+    for (resp_idx, mask) in partitions {
+        let count = mask.intersection_count(candidates);
+        if count == 0 { continue; }
+        let p_cand;
+        if count > 2 {
+            p_cand = Some(mask.intersect(candidates))
+        } else {
+            p_cand = None
+        }
+        result.push((*resp_idx, p_cand, count));
     }
-    partitions
+    result
 }
 
 #[cfg(test)]

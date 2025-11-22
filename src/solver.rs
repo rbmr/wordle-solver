@@ -1,12 +1,10 @@
 use std::cmp::{Reverse};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
-use bitvec::bitvec;
-use bitvec::order::Lsb0;
-use bitvec::vec::BitVec;
 use log::info;
+use crate::bits::BitSet;
 use crate::cache::MemoCache;
-use crate::resp::{generate_partitions, ResponseCache, CORRECT_IDX, N_RESPONSES};
+use crate::resp::{get_lazy_partitions, PartitionMap, CORRECT_IDX};
 use crate::sim::{simulate, MinRemainingPolicy};
 use crate::words::N_CHARS;
 
@@ -22,69 +20,39 @@ pub fn lower_bound(n_candidates: usize) -> usize {
 #[inline]
 pub fn filter_and_sort_guesses(
     guesses: &[usize],
-    response_cache: &ResponseCache,
-    candidates: &BitVec<u64, Lsb0>,
+    partition_map: &PartitionMap,
+    candidates: &BitSet,
     n_candidates: usize,
     beta: usize,
 ) -> Vec<usize> {
 
     let mut scored_guesses: Vec<(usize, usize)> = Vec::with_capacity(guesses.len());
-    let mut counts = [0usize; N_RESPONSES];
-    let mut found_resp = [0usize; N_RESPONSES];
-    let mut n_found_resp: usize = 0;
 
     for &g_idx in guesses {
 
-        // Clear response counts
-        while n_found_resp > 0 {
-            let resp_idx = found_resp[n_found_resp - 1];
-            n_found_resp -= 1;
-            counts[resp_idx] = 0;
-        }
-
-        // Populate response counts
-        let cache_row = response_cache.get_row(g_idx);
-        let words = candidates.as_raw_slice();
-        for (i, &word) in words.iter().enumerate() {
-            if word == 0 { continue; }
-            let mut w = word;
-            let base_idx = i << 6; // Multiply by 64.
-            while w != 0 {
-                let tz = w.trailing_zeros(); // Find the bit
-                w &= w - 1; // Clear bit
-                let c_idx = base_idx + tz as usize;
-                unsafe {
-                    let resp_idx = *cache_row.get_unchecked(c_idx) as usize;
-                    if *counts.get_unchecked(resp_idx) == 0 {
-                        *found_resp.get_unchecked_mut(n_found_resp) = resp_idx;
-                        n_found_resp += 1;
-                    }
-                    *counts.get_unchecked_mut(resp_idx) += 1;
-                }
-            }
-        }
+        // SAFETY: g_idx is bounded by guesses generation, which matches partition_map size
+        let row = unsafe { partition_map.get_unchecked(g_idx) };
 
         // Compute guess score, lb, and information gain
         let mut sum_squares = 0;
         let mut guess_lb = n_candidates;
-
-        for &resp_idx in found_resp[..n_found_resp].iter() {
-            let &c = unsafe { counts.get_unchecked(resp_idx) };
-            sum_squares += c * c;
-            if resp_idx != CORRECT_IDX {
-                guess_lb += lower_bound(c);
+        let mut non_empty_partitions: usize = 0;
+        for (resp_idx, mask) in row {
+            let count = mask.intersection_count(candidates);
+            if count > 0 {
+                non_empty_partitions += 1;
+                sum_squares += count * count;
+                if *resp_idx != CORRECT_IDX {
+                    guess_lb += lower_bound(count);
+                }
             }
         }
 
-        // Skip guesses with no information gain
-        if n_found_resp <= 1 {
-            continue;
-        }
+        // Skip guesses that don't provide any information
+        if non_empty_partitions <= 1 { continue; }
 
         // Skip guesses that dont beat beta
-        if guess_lb >= beta {
-            continue;
-        }
+        if guess_lb >= beta { continue; }
 
         scored_guesses.push((g_idx, sum_squares));
     }
@@ -99,7 +67,7 @@ pub fn filter_and_sort_guesses(
 
 
 struct SolverContext<'a> {
-    response_cache: &'a ResponseCache,
+    partition_map: &'a PartitionMap,
     memo: &'a MemoCache,
 }
 
@@ -109,7 +77,7 @@ impl<'a> SolverContext<'a> {
     /// otherwise returns usize::MAX.
     fn evaluate_candidates(
         &self,
-        candidates: &BitVec<u64, Lsb0>,
+        candidates: &BitSet,
         guesses: &[usize],
         mut beta: usize
     ) -> usize {
@@ -131,7 +99,7 @@ impl<'a> SolverContext<'a> {
 
         // Filter out guesses that don't provide information, or beat beta, sorted by score.
         let next_guesses = filter_and_sort_guesses(
-            guesses, self.response_cache, candidates, n_candidates, beta
+            guesses, self.partition_map, candidates, n_candidates, beta
         );
 
         // Iterate over all reasonable moves and recurse.
@@ -158,38 +126,38 @@ impl<'a> SolverContext<'a> {
     fn evaluate_guess(
         &self,
         g_idx: usize,
-        candidates: &BitVec<u64, Lsb0>,
+        candidates: &BitSet,
         next_guesses: &[usize],
         beta: usize,
         n_candidates: usize,
     ) -> usize {
 
-        // Generate all partitions for the current candidates
-        let partitions = generate_partitions(g_idx, &candidates, self.response_cache);
-
         // Calculate initial lower bound for the guess
         let mut guess_lb = n_candidates;
+        let partitions = get_lazy_partitions(g_idx, &candidates, self.partition_map);
         let mut unresolved_partitions = Vec::with_capacity(partitions.len());
 
-        for (partition_candidates, partition_size) in partitions {
+        for (resp_idx, p_cand, p_size) in partitions {
+            if resp_idx == CORRECT_IDX { continue; }
 
             // Update lower bound using this partition's size
-            if partition_size == 1 {
+            if p_size == 1 {
                 guess_lb += 1;
-            } else if partition_size == 2 {
+            } else if p_size == 2 {
                 guess_lb += 3;
-            } else if let Some(cached_val) = self.memo.get(&partition_candidates) {
-                guess_lb += *cached_val;
             } else {
-                unresolved_partitions.push((partition_candidates, partition_size));
-                guess_lb += lower_bound(partition_size)
+                // p_size > 2, so p_cand is guaranteed to be Some
+                let p_cand = p_cand.unwrap();
+                if let Some(cached_val) = self.memo.get(&p_cand) {
+                    guess_lb += *cached_val;
+                } else {
+                    unresolved_partitions.push((p_cand, p_size));
+                    guess_lb += lower_bound(p_size)
+                }
             }
 
             if guess_lb > beta { return usize::MAX; }
         }
-
-        // Sort the unresolved partitions by descending size to fail fast.
-        unresolved_partitions.sort_unstable_by_key(|(_, n)| Reverse(*n));
 
         // Recurse, tightening lower bound.
         for (partition_candidates, partition_size) in unresolved_partitions {
@@ -254,7 +222,7 @@ impl BestGuess {
 pub fn compute_optimal_move(
     all_candidates: &[[u8; N_CHARS]],
     all_guesses: &[[u8; N_CHARS]],
-    response_cache: &ResponseCache,
+    partition_map: &PartitionMap,
     memo: &MemoCache,
 ) -> (usize, usize) {
 
@@ -262,18 +230,18 @@ pub fn compute_optimal_move(
     let n_total_candidates = all_candidates.len();
     let n_total_guesses = all_guesses.len();
     info!("Starting solver for {} candidates...", n_total_candidates);
-    let initial_candidates = bitvec![u64, Lsb0; 1; n_total_candidates];
+    let initial_candidates = BitSet::ones(n_total_candidates);
 
     // Compute initial heuristic cost using the "Min Remaining" heuristic.
-    let policy = MinRemainingPolicy { response_cache, n_total_candidates, n_total_guesses };
-    let heuristic_cost = simulate(response_cache, &initial_candidates, &policy).total_guesses();
+    let policy = MinRemainingPolicy { partition_map, n_total_candidates, n_total_guesses };
+    let heuristic_cost = simulate(partition_map, &initial_candidates, &policy).total_guesses();
     info!("Initial Heuristic Upper Bound (Beta): {}", heuristic_cost);
 
     // Sort guesses by heuristic to prioritize promising branches.
-    let solver = SolverContext { response_cache, memo };
+    let solver = SolverContext { partition_map, memo };
     let all_guesses: Vec<usize> = (0..n_total_guesses).into_iter().collect();
     let promising_guesses = filter_and_sort_guesses(
-        &all_guesses, response_cache, &initial_candidates, n_total_candidates, heuristic_cost
+        &all_guesses, partition_map, &initial_candidates, n_total_candidates, heuristic_cost
     );
     let total_tasks = promising_guesses.len();
     info!("Sorted {} promising guesses.", total_tasks);
