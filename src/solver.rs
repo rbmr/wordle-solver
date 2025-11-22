@@ -4,7 +4,6 @@ use std::sync::Mutex;
 use bitvec::bitvec;
 use bitvec::order::Lsb0;
 use bitvec::vec::BitVec;
-use indicatif::{ProgressBar, ProgressStyle};
 use log::info;
 use crate::cache::MemoCache;
 use crate::resp::{get_partition_counts, generate_partitions, ResponseCache};
@@ -25,6 +24,8 @@ pub fn filter_and_sort_guesses(
     guesses: &[usize],
     response_cache: &ResponseCache,
     candidates: &BitVec<u64, Lsb0>,
+    n_candidates: usize,
+    beta: usize,
 ) -> Vec<usize> {
 
     let mut scored_guesses: Vec<(usize, usize)> = Vec::with_capacity(guesses.len());
@@ -36,15 +37,22 @@ pub fn filter_and_sort_guesses(
         // Compute guess score, lb, and information gain
         let mut sum_squares = 0;
         let mut non_zero_buckets = 0;
+        let mut guess_lb = n_candidates;
         for c in counts {
             if c > 0 {
                 sum_squares += c * c;
                 non_zero_buckets += 1;
+                guess_lb += lower_bound(c);
             }
         }
 
         // Skip guesses with no information gain
         if non_zero_buckets <= 1 {
+            continue;
+        }
+
+        // Skip guesses that dont beat beta
+        if guess_lb >= beta {
             continue;
         }
 
@@ -93,7 +101,7 @@ impl<'a> SolverContext<'a> {
 
         // Filter out guesses that don't provide information, or beat beta, sorted by score.
         let next_guesses = filter_and_sort_guesses(
-            guesses, self.response_cache, candidates
+            guesses, self.response_cache, candidates, n_candidates, beta
         );
 
         // Iterate over all reasonable moves and recurse.
@@ -106,6 +114,10 @@ impl<'a> SolverContext<'a> {
                 beta = guess_cost;
                 lowest_guess_cost = guess_cost;
             }
+        }
+
+        if lowest_guess_cost != usize::MAX {
+            self.memo.insert(candidates.clone(), lowest_guess_cost);
         }
 
         lowest_guess_cost
@@ -160,7 +172,6 @@ impl<'a> SolverContext<'a> {
             if p_cost == usize::MAX {
                 return usize::MAX;
             }
-            self.memo.insert(partition_candidates.clone(), beta);
             // p_cost != usize::MAX
             // guarantees guess_lb + (p_cost - p_lb) <= beta, because of max cost for child
             guess_lb += p_cost - p_lb;
@@ -171,18 +182,16 @@ impl<'a> SolverContext<'a> {
 
 
 /// Simple struct to manage cross-thread best guess state.
-struct BestGuess<'a> {
+struct BestGuess {
     beta: AtomicUsize,
     solution: Mutex<(usize, usize)>,
-    pbar: &'a ProgressBar,
 }
 
-impl<'a> BestGuess<'a> {
-    fn new(heuristic_cost: usize, pbar: &'a ProgressBar) -> Self {
+impl BestGuess {
+    fn new(heuristic_cost: usize) -> Self {
         Self {
             beta: AtomicUsize::new(heuristic_cost+1),
             solution: Mutex::new((usize::MAX, usize::MAX)),
-            pbar
         }
     }
 
@@ -199,8 +208,6 @@ impl<'a> BestGuess<'a> {
         let mut guard = self.solution.lock().unwrap();
         if cost < guard.1 {
             *guard = (guess_idx, cost);
-            self.pbar.println(format!("New Best found: Cost {} (Guess {})", cost, guess_idx));
-            self.pbar.set_message(format!("Best: {}", cost));
         }
     }
 
@@ -233,29 +240,19 @@ pub fn compute_optimal_move(
     info!("Initial Heuristic Upper Bound (Beta): {}", heuristic_cost);
 
     // Sort guesses by heuristic to prioritize promising branches.
-    let mut solver = SolverContext { response_cache, memo };
+    let solver = SolverContext { response_cache, memo };
     let all_guesses: Vec<usize> = (0..n_total_guesses).into_iter().collect();
     let promising_guesses = filter_and_sort_guesses(
-        &all_guesses, response_cache, &initial_candidates
+        &all_guesses, response_cache, &initial_candidates, n_total_candidates, heuristic_cost
     );
     let total_tasks = promising_guesses.len();
     info!("Sorted {} promising guesses.", total_tasks);
 
     // Setup progress bar
     info!("Starting parallel guess evaluation...");
-    let pb = ProgressBar::new(total_tasks as u64);
-    pb.set_style(ProgressStyle::default_bar()
-        .with_key("percent_precise", |state: &indicatif::ProgressState, w: &mut dyn std::fmt::Write| {
-            write!(w, "{:.2}", state.fraction() * 100.0).unwrap()
-        })
-        .template("[{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} {percent_precise}% ({eta}) {msg}")
-        .unwrap()
-        .progress_chars("█▉▊▋▌▍▎▏ "));
-    pb.set_message(format!("Best: {}", heuristic_cost));
-
-    // Setup cross-thread shared variables.
     let queue_cursor = AtomicUsize::new(0);
-    let best_guess = BestGuess::new(heuristic_cost, &pb);
+    let progress = AtomicUsize::new(0);
+    let best_guess = BestGuess::new(heuristic_cost);
 
     rayon::scope(|s| {
         let num_threads = rayon::current_num_threads();
@@ -278,12 +275,17 @@ pub fn compute_optimal_move(
                     if cost < current_beta {
                         best_guess.update(g_idx, cost);
                     }
-                    pb.inc(1);
+
+                    // Handle logging
+                    let finished = progress.fetch_add(1, Ordering::Relaxed) + 1;
+                    let pct = finished as f64 / total_tasks as f64 * 100.0;
+                    info!("Progress {}/{} ({:.2}%) | Guess {}, Cost {}, Best {}",
+                        finished, total_tasks, pct, g_idx, cost, best_guess.get_beta()
+                    );
                 }
             })
         };
     });
-    pb.finish_with_message("Done");
     let best_result = best_guess.unwrap();
     info!("Optimal solution found: Guess Index {}, Total Cost {}", best_result.0, best_result.1);
     best_result
