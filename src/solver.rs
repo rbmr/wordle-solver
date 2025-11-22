@@ -149,7 +149,7 @@ impl<'a> SolverContext<'a> {
             if *partition_size == 1 {
                 guess_lb += 1;
             } else if *partition_size == 2 {
-                guess_lb += 2;
+                guess_lb += 3;
             } else if let Some(cached_val) = self.memo.get(partition_candidates) {
                 guess_lb += *cached_val;
             } else {
@@ -258,7 +258,10 @@ pub fn compute_optimal_move(
     info!("Starting parallel guess evaluation...");
     let pb = ProgressBar::new(total_tasks as u64);
     pb.set_style(ProgressStyle::default_bar()
-        .template("[{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} {percent}% ({eta}) {msg}")
+        .with_key("percent_precise", |state: &indicatif::ProgressState, w: &mut dyn std::fmt::Write| {
+            write!(w, "{:.2}", state.fraction() * 100.0).unwrap()
+        })
+        .template("[{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} {percent_precise}% ({eta}) {msg}")
         .unwrap()
         .progress_chars("█▉▊▋▌▍▎▏ "));
     pb.set_message(format!("Best: {}", heuristic_cost));
