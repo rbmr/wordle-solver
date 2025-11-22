@@ -17,3 +17,6 @@ thiserror = "2.0.17"
 anyhow = "1.0.100"
 clap = { version = "4.5.53", features = ["derive"] }
 plotters = "0.3.7"
+
+[profile.release]
+debug = true

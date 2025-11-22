@@ -6,7 +6,7 @@ use bitvec::order::Lsb0;
 use bitvec::vec::BitVec;
 use log::info;
 use crate::cache::MemoCache;
-use crate::resp::{get_partition_counts, generate_partitions, ResponseCache};
+use crate::resp::{generate_partitions, ResponseCache, CORRECT_IDX, N_RESPONSES};
 use crate::sim::{simulate, MinRemainingPolicy};
 use crate::words::N_CHARS;
 
@@ -29,25 +29,55 @@ pub fn filter_and_sort_guesses(
 ) -> Vec<usize> {
 
     let mut scored_guesses: Vec<(usize, usize)> = Vec::with_capacity(guesses.len());
+    let mut counts = [0usize; N_RESPONSES];
+    let mut found_resp = [0usize; N_RESPONSES];
+    let mut n_found_resp: usize = 0;
+
     for &g_idx in guesses {
 
-        // Get partition counts
-        let counts = get_partition_counts(g_idx, candidates, response_cache);
+        // Clear response counts
+        while n_found_resp > 0 {
+            let resp_idx = found_resp[n_found_resp - 1];
+            n_found_resp -= 1;
+            counts[resp_idx] = 0;
+        }
+
+        // Populate response counts
+        let cache_row = response_cache.get_row(g_idx);
+        let words = candidates.as_raw_slice();
+        for (i, &word) in words.iter().enumerate() {
+            if word == 0 { continue; }
+            let mut w = word;
+            let base_idx = i << 6; // Multiply by 64.
+            while w != 0 {
+                let tz = w.trailing_zeros(); // Find the bit
+                w &= w - 1; // Clear bit
+                let c_idx = base_idx + tz as usize;
+                unsafe {
+                    let resp_idx = *cache_row.get_unchecked(c_idx) as usize;
+                    if *counts.get_unchecked(resp_idx) == 0 {
+                        *found_resp.get_unchecked_mut(n_found_resp) = resp_idx;
+                        n_found_resp += 1;
+                    }
+                    *counts.get_unchecked_mut(resp_idx) += 1;
+                }
+            }
+        }
 
         // Compute guess score, lb, and information gain
         let mut sum_squares = 0;
-        let mut non_zero_buckets = 0;
         let mut guess_lb = n_candidates;
-        for c in counts {
-            if c > 0 {
-                sum_squares += c * c;
-                non_zero_buckets += 1;
+
+        for &resp_idx in found_resp[..n_found_resp].iter() {
+            let &c = unsafe { counts.get_unchecked(resp_idx) };
+            sum_squares += c * c;
+            if resp_idx != CORRECT_IDX {
                 guess_lb += lower_bound(c);
             }
         }
 
         // Skip guesses with no information gain
-        if non_zero_buckets <= 1 {
+        if n_found_resp <= 1 {
             continue;
         }
 
