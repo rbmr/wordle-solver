@@ -6,7 +6,7 @@ use bitvec::order::Lsb0;
 use bitvec::vec::BitVec;
 use log::info;
 use crate::cache::MemoCache;
-use crate::resp::{generate_partitions, ResponseCache, CORRECT_IDX, N_RESPONSES};
+use crate::resp::{generate_partitions, ResponseCache, N_RESPONSES};
 use crate::sim::{simulate, MinRemainingPolicy};
 use crate::words::N_CHARS;
 
@@ -24,8 +24,6 @@ pub fn filter_and_sort_guesses(
     guesses: &[usize],
     response_cache: &ResponseCache,
     candidates: &BitVec<u64, Lsb0>,
-    n_candidates: usize,
-    beta: usize,
 ) -> Vec<usize> {
 
     let mut scored_guesses: Vec<(usize, usize)> = Vec::with_capacity(guesses.len());
@@ -66,23 +64,14 @@ pub fn filter_and_sort_guesses(
 
         // Compute guess score, lb, and information gain
         let mut sum_squares = 0;
-        let mut guess_lb = n_candidates;
 
         for &resp_idx in found_resp[..n_found_resp].iter() {
             let &c = unsafe { counts.get_unchecked(resp_idx) };
             sum_squares += c * c;
-            if resp_idx != CORRECT_IDX {
-                guess_lb += lower_bound(c);
-            }
         }
 
         // Skip guesses with no information gain
         if n_found_resp <= 1 {
-            continue;
-        }
-
-        // Skip guesses that dont beat beta
-        if guess_lb >= beta {
             continue;
         }
 
@@ -131,7 +120,7 @@ impl<'a> SolverContext<'a> {
 
         // Filter out guesses that don't provide information, or beat beta, sorted by score.
         let next_guesses = filter_and_sort_guesses(
-            guesses, self.response_cache, candidates, n_candidates, beta
+            guesses, self.response_cache, candidates,
         );
 
         // Iterate over all reasonable moves and recurse.
@@ -273,7 +262,7 @@ pub fn compute_optimal_move(
     let solver = SolverContext { response_cache, memo };
     let all_guesses: Vec<usize> = (0..n_total_guesses).into_iter().collect();
     let promising_guesses = filter_and_sort_guesses(
-        &all_guesses, response_cache, &initial_candidates, n_total_candidates, heuristic_cost
+        &all_guesses, response_cache, &initial_candidates,
     );
     let total_tasks = promising_guesses.len();
     info!("Sorted {} promising guesses.", total_tasks);

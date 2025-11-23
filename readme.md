@@ -1,5 +1,30 @@
 # Wordle Solver
 
+A solver for the popular word guessing game Wordle.
+
+The primary goal of this project was to learn how to use Rust. This goal has been accomplished. 
+
+A secondary goal was to then compute the true optimal strategy feasibly, instead of using a heuristic. This goal has been partially accomplished. This repository implements a valid algorithm that computes the optimal strategy, but in order to run it on my laptop, it would take multiple days. 
+
+The section "An Attempt to Compute the Optimal Strategy" lays out the key ideas leading to my implementation.
+
+## Code
+
+The code provided in this repository consists of the following:
+
+- Standardized word lists.
+- Implementation of multiple policies including max-frequency, min-remaining, and the optimal policy.
+- Functions to build, store and retrieve the optimal strategy cache.
+- A simulation engine to evaluate the performance of any policy.
+- Graph generation to neatly compare the performance of difference policies.
+- Standardized and highly efficient functions to compute responses, and partitions.
+- A CLI tool to: play wordle using any policy, generate the optimal strategy cache, and create policy comparison charts.
+
+![comparison.svg](comparison.svg)
+
+
+# An Attempt to Compute the Optimal Strategy
+
 ## Word sets
 
 The game of Wordle relies on a definition of the following components.
